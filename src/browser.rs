@@ -26,10 +26,10 @@
 //! carries an incrementing id; we wait for the matching response and ignore
 //! events except `Page.loadEventFired`, which `navigate` awaits.
 
+use crate::transport::{CdpTransport, PipeTransport, WsTransport};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -173,16 +173,15 @@ pub struct AxNode {
     pub dom_idx: u64,
 }
 
-/// A live browser process + the CDP pipe (fds 3/4) to it.
+/// A live browser + the CDP transport to it. The browser is either one we
+/// spawned locally (pipe transport, exact-PID teardown) or a remote one we
+/// merely connected to (WS transport, no process to own).
 pub struct BrowserSession {
-    /// Exact PID we spawned — the ONLY process we ever kill.
-    pid: u32,
-    /// Parent write end → child's fd 3 (we send CDP here).
-    cdp_write: std::fs::File,
-    /// Parent read end ← child's fd 4 (we receive CDP here).
-    cdp_read: std::fs::File,
-    /// Unconsumed bytes from the read pipe (frames arrive interleaved).
-    read_buf: Vec<u8>,
+    /// Exact PID we spawned — the ONLY process we ever kill. `None` for a remote
+    /// (WS) connection: rudder did not spawn it and must never kill it.
+    pid: Option<u32>,
+    /// The CDP transport: local pipe or remote WebSocket.
+    transport: CdpTransport,
     next_id: i64,
     binary: String,
     /// CDP session id for the attached page target. In `--remote-debugging-pipe`
@@ -194,7 +193,8 @@ pub struct BrowserSession {
     /// closing (popup dismissed / tab closed) and auto-follow to another page.
     target_id: Option<String>,
     /// The spawned process handle, kept so close() can reap it (waitpid).
-    child: std::process::Child,
+    /// `None` for a remote (WS) connection.
+    child: Option<std::process::Child>,
     /// Current AX snapshot: `ref_N` → node. Cleared on navigation / new read.
     refs: HashMap<String, AxNode>,
     ref_counter: usize,
@@ -291,7 +291,7 @@ impl BrowserSession {
         let cdp_read = unsafe { std::fs::File::from_raw_fd(from_child_r) };
         // Make our read end non-blocking so next_frame can poll against a
         // deadline instead of hanging forever when the browser sends nothing.
-        set_nonblocking(from_child_r)?;
+        crate::transport::set_nonblocking(from_child_r)?;
         // The child-side raw fds (to_child_r / from_child_w) were consumed into
         // pre_exec by value; after fork they live only in the child. Close our
         // copies. std does this when the child exits, but we close eagerly to
@@ -303,15 +303,13 @@ impl BrowserSession {
         }
 
         let mut session = BrowserSession {
-            pid,
-            cdp_write,
-            cdp_read,
-            read_buf: Vec::new(),
+            pid: Some(pid),
+            transport: CdpTransport::Pipe(PipeTransport::new(cdp_write, cdp_read)),
             next_id: 1,
             binary,
             session_id: None,
             target_id: None,
-            child,
+            child: Some(child),
             refs: HashMap::new(),
             ref_counter: 0,
             screencast_on: false,
@@ -327,6 +325,42 @@ impl BrowserSession {
             Err(e) => {
                 session.close();
                 return Err(format!("CDP handshake failed over pipe: {e}"));
+            }
+        }
+        Ok(session)
+    }
+
+    /// Connect to a REMOTE browser over a CDP WebSocket URL (`ws://` / `wss://`)
+    /// WITHOUT spawning a process. This is the hosted path: the URL points at a
+    /// browser someone else runs — e.g. Cloudflare Browser Run, which exposes a
+    /// standard CDP-over-WebSocket endpoint. We attach to a page target and
+    /// enable the same domains as `launch`, then drive it identically; every
+    /// tool works over this transport because the CDP conversation is the same.
+    ///
+    /// No broker lock is taken: the one-browser-per-user lock is about a LOCAL
+    /// spawned browser sharing a profile dir; a remote browser has neither.
+    pub fn connect(_rt: &tokio::runtime::Runtime, cdp_ws_url: &str) -> Result<Self, String> {
+        let ws = WsTransport::connect(cdp_ws_url)?;
+        let mut session = BrowserSession {
+            pid: None,
+            transport: CdpTransport::WebSocket(ws),
+            next_id: 1,
+            binary: cdp_ws_url.to_string(),
+            session_id: None,
+            target_id: None,
+            child: None,
+            refs: HashMap::new(),
+            ref_counter: 0,
+            screencast_on: false,
+            pending_screencast: Vec::new(),
+            console: Vec::new(),
+            network: Vec::new(),
+        };
+        match session.attach_page() {
+            Ok(()) => {}
+            Err(e) => {
+                session.close();
+                return Err(format!("CDP handshake failed over WebSocket: {e}"));
             }
         }
         Ok(session)
@@ -504,18 +538,18 @@ impl BrowserSession {
         if let Some(sid) = &self.session_id {
             msg["sessionId"] = json!(sid);
         }
-        let mut bytes = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
-        bytes.push(0); // NUL terminator
-        self.cdp_write
-            .write_all(&bytes)
+        // Serialize WITHOUT framing — the transport adds a NUL (pipe) or wraps
+        // it in a WS frame (WebSocket). Tagging the error with the method keeps
+        // the dead-pipe detection heuristic (is_dead_pipe) working.
+        let bytes = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+        self.transport
+            .send(&bytes)
             .map_err(|e| format!("CDP send {method}: {e}"))?;
-        self.cdp_write
-            .flush()
-            .map_err(|e| format!("CDP flush {method}: {e}"))?;
 
         let deadline = Instant::now() + CDP_TIMEOUT;
         loop {
             let frame = self
+                .transport
                 .next_frame(deadline)?
                 .ok_or_else(|| format!("CDP timeout waiting for {method}"))?;
             let v: Value = match serde_json::from_slice(&frame) {
@@ -532,63 +566,6 @@ impl BrowserSession {
         }
     }
 
-    /// Read the next `\0`-delimited frame from the pipe, waiting until
-    /// `deadline`. Returns `Ok(None)` on timeout, `Ok(Some(bytes))` otherwise.
-    /// A partial trailing chunk stays buffered for the next call.
-    fn next_frame(&mut self, deadline: Instant) -> Result<Option<Vec<u8>>, String> {
-        loop {
-            // Emit any complete frame already buffered.
-            if let Some(pos) = self.read_buf.iter().position(|&b| b == 0) {
-                let frame: Vec<u8> = self.read_buf.drain(..=pos).collect();
-                let frame = frame[..frame.len() - 1].to_vec(); // strip NUL
-                if frame.is_empty() {
-                    continue;
-                }
-                return Ok(Some(frame));
-            }
-            if Instant::now() >= deadline {
-                return Ok(None);
-            }
-            let mut chunk = [0u8; 8192];
-            match self.cdp_read.read(&mut chunk) {
-                Ok(0) => return Err("CDP pipe closed (browser exited)".to_string()),
-                Ok(n) => self.read_buf.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(format!("CDP read: {e}")),
-            }
-        }
-    }
-
-    /// Non-blocking single read pass: pull every byte currently available on the
-    /// pipe (the fd is O_NONBLOCK) into `read_buf`, then split out all COMPLETE
-    /// `\0`-delimited frames. A partial trailing frame stays buffered for the
-    /// next call. Returns an empty Vec when nothing is ready — never sleeps.
-    /// Used by the screencast pump, which must poll without blocking tool calls.
-    fn drain_available_frames(&mut self) -> Result<Vec<Vec<u8>>, String> {
-        loop {
-            let mut chunk = [0u8; 65536];
-            match self.cdp_read.read(&mut chunk) {
-                Ok(0) => return Err("CDP pipe closed (browser exited)".to_string()),
-                Ok(n) => self.read_buf.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(format!("CDP read: {e}")),
-            }
-        }
-        let mut frames = Vec::new();
-        while let Some(pos) = self.read_buf.iter().position(|&b| b == 0) {
-            let frame: Vec<u8> = self.read_buf.drain(..=pos).collect();
-            let frame = frame[..frame.len() - 1].to_vec(); // strip NUL
-            if !frame.is_empty() {
-                frames.push(frame);
-            }
-        }
-        Ok(frames)
-    }
-
     // ── Navigation ───────────────────────────────────────────────────
 
     pub fn navigate(&mut self, url: &str) -> Result<(), String> {
@@ -597,11 +574,14 @@ impl BrowserSession {
         self.cdp("Page.navigate", json!({ "url": url }))?;
         // Best-effort wait for the load event, bounded so SPA pages don't hang.
         let deadline = Instant::now() + LOAD_TIMEOUT;
-        while let Ok(Some(frame)) = self.next_frame(deadline) {
-            if let Ok(v) = serde_json::from_slice::<Value>(&frame)
-                && v.get("method").and_then(|m| m.as_str()) == Some("Page.loadEventFired")
-            {
-                break;
+        while let Ok(Some(frame)) = self.transport.next_frame(deadline) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
+                if v.get("method").and_then(|m| m.as_str()) == Some("Page.loadEventFired") {
+                    break;
+                }
+                // Don't drop screencast/console/network events that land while
+                // we wait for the load event — buffer them like the cdp() loop.
+                self.capture_cdp_event(&v);
             }
         }
         Ok(())
@@ -987,12 +967,21 @@ impl BrowserSession {
     /// Kill ONLY the Chromium tree we spawned: SIGTERM the process group
     /// (leader == our exact pid via `process_group(0)`) for a graceful shutdown,
     /// then SIGKILL after a short grace period if still alive, then reap.
+    ///
+    /// For a REMOTE (WS) connection there is no process we own: rudder must
+    /// never kill a browser it did not spawn. We just stop the screencast (a
+    /// best-effort CDP call) and drop the transport (which closes the socket).
     pub fn close(&mut self) {
-        // Best-effort: stop the screencast before we kill the process so the
-        // encoder isn't left running mid-frame. Ignores errors (pipe may be
+        // Best-effort: stop the screencast before we kill/disconnect so the
+        // encoder isn't left running mid-frame. Ignores errors (transport may be
         // dead already — we're tearing down regardless).
         self.stop_screencast();
-        let pid = self.pid as i32;
+        let Some(pid) = self.pid else {
+            // Remote connection: nothing to kill. Dropping self.transport on the
+            // way out closes the WS.
+            return;
+        };
+        let pid = pid as i32;
         // SAFETY: signalling the process group we created for our own child.
         unsafe { nix::libc::kill(-pid, nix::libc::SIGTERM) };
         let mut reaped = false;
@@ -1007,11 +996,14 @@ impl BrowserSession {
             unsafe { nix::libc::kill(-pid, nix::libc::SIGKILL) };
         }
         // Reap the leader (waitpid) so it doesn't linger as a zombie.
-        let _ = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.wait();
+        }
     }
 
+    /// The spawned browser's PID, or 0 for a remote (WS) connection we don't own.
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.pid.unwrap_or(0)
     }
 
     pub fn binary(&self) -> &str {
@@ -1083,7 +1075,7 @@ impl BrowserSession {
     /// without blocking, so the debug tools see events that arrived since the
     /// last command round-trip. Best-effort — a dead pipe surfaces elsewhere.
     pub fn pump_events(&mut self) {
-        if let Ok(frames) = self.drain_available_frames() {
+        if let Ok(frames) = self.transport.drain_frames() {
             for frame in frames {
                 if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
                     self.capture_cdp_event(&v);
@@ -1100,12 +1092,12 @@ impl BrowserSession {
         if !self.screencast_on {
             return Ok(None);
         }
-        // Drain frames sitting on the pipe in one non-blocking read pass (the
-        // fd is O_NONBLOCK). We can't reuse `next_frame`: with deadline=now it
-        // returns before reading, and with a future deadline it sleeps until
-        // then. `drain_available_frames` reads until WouldBlock and returns
-        // every complete frame currently buffered, keeping a partial tail.
-        for frame in self.drain_available_frames()? {
+        // Drain frames sitting on the transport in one non-blocking pass. We
+        // can't reuse `next_frame`: with deadline=now it returns before reading,
+        // and with a future deadline it sleeps until then. `drain_frames` reads
+        // everything currently buffered (pipe: until WouldBlock; WS: until the
+        // inbound channel is empty), keeping any partial tail.
+        for frame in self.transport.drain_frames()? {
             if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
                 self.capture_cdp_event(&v);
             }
@@ -1141,20 +1133,6 @@ fn os_pipe() -> Result<(RawFd, RawFd), String> {
     // nix 0.29 returns OwnedFd; convert to raw and take ownership manually.
     use std::os::unix::io::IntoRawFd as _;
     Ok((r.into_raw_fd(), w.into_raw_fd()))
-}
-
-/// Set `O_NONBLOCK` on a fd so reads return `WouldBlock` instead of hanging.
-fn set_nonblocking(fd: RawFd) -> Result<(), String> {
-    // SAFETY: standard fcntl on a fd we own.
-    let flags = unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFL) };
-    if flags < 0 {
-        return Err("fcntl F_GETFL failed".to_string());
-    }
-    let rc = unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
-    if rc < 0 {
-        return Err("fcntl F_SETFL O_NONBLOCK failed".to_string());
-    }
-    Ok(())
 }
 
 /// `dup2(from, to)` returning an io::Error on failure (for pre_exec).
@@ -1770,6 +1748,7 @@ mod tests {
     /// buffering, and event-skip all work without a live browser.
     #[test]
     fn pipe_frame_round_trip_and_partial_buffering() {
+        use std::io::{Read, Write};
         use std::os::unix::io::FromRawFd;
         // A self-pipe: write frames in, read them out via next_frame.
         let (r, w) = os_pipe().unwrap();

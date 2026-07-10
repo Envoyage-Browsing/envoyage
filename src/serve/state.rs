@@ -22,6 +22,21 @@ pub fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
 }
 
+/// A remote CDP WebSocket URL to drive INSTEAD of spawning a local browser.
+/// Set once at startup from `--cdp-url`; `with_browser` reads it to decide
+/// between `BrowserSession::connect` (remote) and `::launch` (local spawn).
+static CDP_URL: OnceLock<Option<String>> = OnceLock::new();
+
+/// Record the remote CDP URL (or `None` for local spawn). Call once at startup.
+pub fn set_cdp_url(url: Option<String>) {
+    let _ = CDP_URL.set(url);
+}
+
+/// The configured remote CDP URL, if any.
+pub fn cdp_url() -> Option<&'static str> {
+    CDP_URL.get().and_then(|o| o.as_deref())
+}
+
 /// Paused flag toggled by the human via the WS UI. While paused rudder still
 /// streams frames + forwards the human's input, but MCP tools return text-only
 /// (no screenshot to the model — passwords never leave to the LLM).

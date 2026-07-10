@@ -21,19 +21,19 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // ─── JSON-RPC 2.0 types ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
+pub struct JsonRpcRequest {
     #[allow(dead_code)]
     #[serde(default)]
     jsonrpc: String,
     #[serde(default)]
-    id: Option<Value>,
-    method: String,
+    pub id: Option<Value>,
+    pub method: String,
     #[serde(default)]
     params: Value,
 }
 
 #[derive(Debug, Serialize)]
-struct JsonRpcResponse {
+pub struct JsonRpcResponse {
     jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<Value>,
@@ -107,7 +107,7 @@ pub fn serve_stdio() -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_request(req: &JsonRpcRequest) -> JsonRpcResponse {
+pub fn handle_request(req: &JsonRpcRequest) -> JsonRpcResponse {
     let base = JsonRpcResponse {
         jsonrpc: "2.0".into(),
         id: req.id.clone(),

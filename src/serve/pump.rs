@@ -30,29 +30,47 @@ pub fn with_browser<T>(
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
     if guard.is_none() {
-        let self_pid = std::process::id();
-        if let browser_lock::Decision::RouteTo { owner_pid, .. } =
-            browser_lock::decide(browser_lock::read().as_ref(), self_pid)
-        {
-            return Err(format!(
-                "rudder's browser is already open and owned by another session \
-                 (pid {owner_pid}). Use that session's browser, or close it first."
-            ));
-        }
-        let url = launch_url.unwrap_or("about:blank");
-        // The core's `launch` takes a tokio runtime handle it never uses; a
-        // throwaway current-thread runtime satisfies the signature.
+        // The core's launch/connect take a tokio runtime handle; the pipe path
+        // never uses it, the WS path builds its own — a throwaway current-thread
+        // runtime satisfies the signature.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|e| e.to_string())?;
-        let session = BrowserSession::launch(&rt, url)?;
-        if let Ok(nonce) = browser_lock::acquire(self_pid, 0, session.pid())
-            && !browser_lock::confirm_nonce(&nonce)
-        {
-            drop(session);
-            return Err("Lost a race to open the browser to another session — retry.".to_string());
+
+        // Remote path: drive a browser we did NOT spawn (Cloudflare Browser Run
+        // etc.). No broker lock — that's about a local shared profile dir, which
+        // a remote connection has neither of.
+        if let Some(cdp_url) = state::cdp_url() {
+            let session = BrowserSession::connect(&rt, cdp_url)?;
+            if let Some(url) = launch_url {
+                // A remote browser is already on a page; honor an explicit open.
+                let mut s = session;
+                s.navigate(url)?;
+                *guard = Some(s);
+            } else {
+                *guard = Some(session);
+            }
+        } else {
+            // Local spawn path: honor the one-browser-per-user broker lock.
+            let self_pid = std::process::id();
+            if let browser_lock::Decision::RouteTo { owner_pid, .. } =
+                browser_lock::decide(browser_lock::read().as_ref(), self_pid)
+            {
+                return Err(format!(
+                    "rudder's browser is already open and owned by another session \
+                     (pid {owner_pid}). Use that session's browser, or close it first."
+                ));
+            }
+            let url = launch_url.unwrap_or("about:blank");
+            let session = BrowserSession::launch(&rt, url)?;
+            if let Ok(nonce) = browser_lock::acquire(self_pid, 0, session.pid())
+                && !browser_lock::confirm_nonce(&nonce)
+            {
+                drop(session);
+                return Err("Lost a race to open the browser to another session — retry.".to_string());
+            }
+            *guard = Some(session);
         }
-        *guard = Some(session);
     }
     let session = guard.as_mut().unwrap();
     let result = session.ensure_live_target().and_then(|()| f(session));
