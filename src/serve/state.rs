@@ -9,6 +9,7 @@
 
 use crate::browser::BrowserSession;
 use crate::protocol::Input;
+use crate::serve::recorder::Recording;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc};
@@ -82,4 +83,36 @@ pub fn drain_input() -> Vec<Input> {
         }
     }
     out
+}
+
+// ─── GIF recording buffer ───────────────────────────────────────────
+//
+// The `browser_gif` tool buffers screencast frames while recording is on. The
+// pump appends each broadcast frame's PNG (with whatever overlay hint the last
+// action left pending); MCP tool dispatch sets that pending hint when it emits a
+// cursor/narration. Both sides share this one mutex.
+
+/// The recording buffer + captured frames. `None` = not recording (frames kept
+/// after `stop_recording` until `clear`/new `start_recording`).
+static RECORDING: OnceLock<Mutex<Recording>> = OnceLock::new();
+
+/// Access the shared recording buffer.
+pub fn recording() -> &'static Mutex<Recording> {
+    RECORDING.get_or_init(|| Mutex::new(Recording::new()))
+}
+
+/// Pump hook: append a frame's PNG to the recording iff recording is active.
+/// Attaches (and consumes) any pending overlay hint. No-op when not recording.
+pub fn record_frame(png_base64: &str) {
+    if let Ok(mut rec) = recording().lock() {
+        rec.push_frame(png_base64);
+    }
+}
+
+/// MCP hook: stamp the overlay hint (cursor + label) that the next captured
+/// frame should carry. No-op when not recording.
+pub fn record_overlay(cursor: Option<(f64, f64)>, label: Option<String>) {
+    if let Ok(mut rec) = recording().lock() {
+        rec.set_pending_overlay(cursor, label);
+    }
 }

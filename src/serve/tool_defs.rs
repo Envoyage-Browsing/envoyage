@@ -161,6 +161,38 @@ fn tool_defs() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "browser_gif",
+            "description": "Record a browser-automation session and export it as an annotated animated GIF (parity with claude-in-chrome's gif_creator). Flow: 'start_recording' begins buffering the live screencast; drive the browser with the other browser_* tools; 'stop_recording' stops buffering (frames are kept); 'export' composites the requested overlays and WRITES a .gif under ${RUDDER_HOME:-~/.rudder}/gif/, returning its absolute path (the consumer serves/downloads that file); 'clear' drops the buffer. rudder is vendor-neutral: there is NO baked-in logo — showWatermark defaults false and, if enabled, renders only the caller-supplied neutral 'watermarkText'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["start_recording", "stop_recording", "export", "clear"],
+                        "description": "start_recording | stop_recording | export | clear"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "export only: output filename (default 'recording-<seq>.gif'). Sanitized; '.gif' is appended if missing."
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": "export only: overlay toggles + quality.",
+                        "properties": {
+                            "showClickIndicators": { "type": "boolean", "description": "Orange ring at each click point (default true)." },
+                            "showActionLabels": { "type": "boolean", "description": "Text label describing each action, from the narration (default true)." },
+                            "showProgressBar": { "type": "boolean", "description": "Orange progress bar along the bottom (default true)." },
+                            "showDragPaths": { "type": "boolean", "description": "Drag-path trails (default false; not yet implemented in rudder)." },
+                            "showWatermark": { "type": "boolean", "description": "Render 'watermarkText' as a neutral watermark (default false — rudder ships no logo)." },
+                            "watermarkText": { "type": "string", "description": "Neutral watermark text (default empty). The consumer brands it; rudder never does." },
+                            "quality": { "type": "integer", "description": "1-30, lower = better quality (default 10)." }
+                        }
+                    }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
             "name": "browser_wait_for_human",
             "description": "Wait for the human to finish driving the paused browser and click ▶ Continue in the live view. Call this after a handoff (auto-detected or via browser_request_human) INSTEAD of sleeping. Returns when the human resumes, or after the timeout — call again if it times out.",
             "inputSchema": {

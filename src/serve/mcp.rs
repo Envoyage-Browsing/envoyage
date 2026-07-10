@@ -7,6 +7,7 @@
 //! byte-for-byte the same shape.
 
 use super::pump::{ensure_pump, with_browser};
+use super::recorder::ExportOptions;
 use super::state;
 use crate::browser;
 use crate::protocol::{Cursor, CursorAction, HumanRequest, Narration, State};
@@ -174,6 +175,7 @@ fn call_tool(params: &Value, base: JsonRpcResponse) -> JsonRpcResponse {
         "browser_upload" => handle_upload(&arguments),
         "browser_console" => handle_console(),
         "browser_network" => handle_network(),
+        "browser_gif" => handle_gif(&arguments),
         other => Err(format!("Unknown tool: {other}")),
     };
     match result {
@@ -342,6 +344,12 @@ fn handle_browser_shot(tool: &str, args: &Value) -> Result<Vec<Value>, String> {
     if let Some((x, y, action)) = &cursor {
         emit_cursor(*x, *y, *action);
     }
+    // Stamp the GIF recorder's pending overlay so the next captured frame carries
+    // this action's click point + label (no-op unless recording).
+    state::record_overlay(
+        cursor.as_ref().map(|(x, y, _)| (*x, *y)),
+        narration.clone(),
+    );
 
     // Human-handoff: pause, banner, text-only (no screenshot to the model).
     if let Some(reason) = handoff {
@@ -519,6 +527,62 @@ fn handle_network() -> Result<String, String> {
         b.pump_events();
         Ok(render_log("network response", b.network_log()))
     })
+}
+
+fn handle_gif(args: &Value) -> Result<String, String> {
+    let action = args.get("action").and_then(|s| s.as_str()).ok_or("'action' is required")?;
+    let mut rec = state::recording().lock().map_err(|_| "recording lock poisoned".to_string())?;
+    match action {
+        "start_recording" => {
+            rec.start();
+            // Ensure the pump is running so frames actually flow into the buffer.
+            ensure_pump();
+            Ok("⏺ Recording started — drive the browser, then export.".to_string())
+        }
+        "stop_recording" => {
+            rec.stop();
+            Ok(format!("⏹ Recording stopped — {} frame(s) buffered. Call export.", rec.frame_count()))
+        }
+        "clear" => {
+            rec.clear();
+            Ok("🗑 Recording buffer cleared.".to_string())
+        }
+        "export" => {
+            let filename = args.get("filename").and_then(|s| s.as_str());
+            let opts = parse_export_options(args.get("options"));
+            let frames = rec.frame_count();
+            let path = rec.export(filename, &opts)?;
+            Ok(format!(
+                "🎞 Wrote {}-frame GIF to {} — the consumer can serve or download it.",
+                frames,
+                path.display()
+            ))
+        }
+        other => Err(format!(
+            "unknown gif action {other:?}; use start_recording | stop_recording | export | clear"
+        )),
+    }
+}
+
+/// Parse the export `options` object into [`ExportOptions`], honoring the
+/// claude-in-chrome defaults (all bool overlays true EXCEPT the vendor-neutral
+/// watermark, which defaults false).
+fn parse_export_options(opts: Option<&Value>) -> ExportOptions {
+    let mut o = ExportOptions::default();
+    let Some(opts) = opts else { return o };
+    let get_bool = |k: &str, d: bool| opts.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
+    o.show_click_indicators = get_bool("showClickIndicators", o.show_click_indicators);
+    o.show_action_labels = get_bool("showActionLabels", o.show_action_labels);
+    o.show_progress_bar = get_bool("showProgressBar", o.show_progress_bar);
+    o.show_drag_paths = get_bool("showDragPaths", o.show_drag_paths);
+    o.show_watermark = get_bool("showWatermark", o.show_watermark);
+    if let Some(t) = opts.get("watermarkText").and_then(|v| v.as_str()) {
+        o.watermark_text = t.to_string();
+    }
+    if let Some(q) = opts.get("quality").and_then(|v| v.as_u64()) {
+        o.quality = q.clamp(1, 30) as u8;
+    }
+    o
 }
 
 fn render_log(kind: &str, lines: &[String]) -> String {

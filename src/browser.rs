@@ -897,6 +897,14 @@ impl BrowserSession {
         })
     }
 
+    /// Test-only escape hatch to force page repaints in the live smokes (the
+    /// scheme allowlist forbids `data:` URLs, so tests can't navigate to an
+    /// animated page). Not part of the public/production surface.
+    #[cfg(test)]
+    pub(crate) fn eval_for_test(&mut self, js: &str) -> Result<Value, String> {
+        self.eval_raw(js)
+    }
+
     fn eval_raw(&mut self, js: &str) -> Result<Value, String> {
         let result = self.cdp(
             "Runtime.evaluate",

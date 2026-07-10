@@ -61,7 +61,7 @@ fn initialize_and_list_tools() {
     }
     // The core surface is present.
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in ["browser_open", "browser_read_page", "browser_click", "browser_request_human"] {
+    for expected in ["browser_open", "browser_read_page", "browser_click", "browser_request_human", "browser_gif"] {
         assert!(names.contains(&expected), "missing {expected}");
     }
     // eval is gated OFF by default.

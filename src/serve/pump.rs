@@ -141,6 +141,9 @@ fn pump_loop() {
         };
         if let Some((png, title, url)) = frame {
             seq += 1;
+            // Feed the GIF recorder (no-op unless recording); it takes the PNG
+            // before broadcast moves it into the envelope.
+            state::record_frame(&png);
             let f = Frame { png_base64: png, title, url, seq };
             if let Ok(env) = serde_json::to_string(&f.to_envelope()) {
                 state::broadcast_envelope(env);

@@ -5,10 +5,12 @@
 //! - [`state`] — process-global browser slot, pause flag, WS<->pump channels.
 //! - [`pump`] — the screencast pump + `with_browser` access + ownership lock.
 //! - [`mcp`] — the JSON-RPC MCP server and `browser_*` tool handlers.
+//! - [`recorder`] — the `browser_gif` recording buffer + annotated-GIF export.
 //! - [`ws`] — the WS frame-stream server.
 
 mod mcp;
 mod pump;
+mod recorder;
 mod state;
 mod ws;
 
