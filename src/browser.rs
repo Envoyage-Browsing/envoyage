@@ -1567,7 +1567,7 @@ mod tests {
     /// a frame arrives, dispatch a click, and close cleanly (exact pid reaped,
     /// no external window since headless). Ignored by default — needs a
     /// Chromium-engine browser installed. Run with:
-    ///   cargo test -p immorterm-daemon -- --ignored screencast_live_smoke
+    ///   cargo test -p rudder -- --ignored screencast_live_smoke
     #[test]
     #[ignore = "needs a real browser; run explicitly"]
     fn screencast_live_smoke() {

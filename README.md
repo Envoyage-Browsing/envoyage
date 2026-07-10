@@ -1,0 +1,147 @@
+# rudder
+
+**Drive a real browser from any AI agent — live.**
+
+rudder launches a headless Chromium over a private CDP pipe and gives an AI
+agent a small, ref-based tool surface to navigate, read, click, type, scroll,
+upload, switch tabs, and hand off to a human. It streams a live screencast plus
+a **mascot-neutral** cursor/narration protocol so a UI can render its own
+animated cursor gliding to exactly where the agent is about to act.
+
+rudder draws **nothing** itself. It gives you the frame, the cursor point, and
+the intent string — you skin them.
+
+## Bring your own mascot
+
+This is the whole point. rudder emits *what happened* and *what's about to
+happen* as vendor-neutral events. The consumer renders them however it likes:
+
+| Consumer | Mascot it glides to the cursor point |
+|----------|--------------------------------------|
+| ImmorTerm | **Mort** the axolotl |
+| ringtail | **Rocco** the ringtail |
+| _yours_ | _whatever you draw_ |
+
+rudder ships no cursor sprite, no balloon, no branding. See
+[`src/protocol.rs`](src/protocol.rs) — the customization seam.
+
+## Quickstart
+
+### As a CLI (npm)
+
+```bash
+npx @immorterm/rudder serve            # MCP over stdio (point Claude / any MCP client at it)
+npx @immorterm/rudder serve --ws-port 8787   # also stream frames over WS
+npx @immorterm/rudder serve --ws-port 8787 --mcp   # both
+```
+
+### As a Rust crate
+
+```rust
+use rudder::BrowserSession;
+
+let rt = tokio::runtime::Builder::new_current_thread().build()?;
+let mut b = BrowserSession::launch(&rt, "https://example.com")?;
+let (title, url, nodes) = b.snapshot(true)?;      // ref-based AX listing
+b.click_ref("ref_3")?;                            // click by handle
+let png_base64 = b.screenshot()?;                 // CSS-pixel-accurate PNG
+```
+
+The protocol types a consumer renders:
+
+```rust
+use rudder::{Frame, Cursor, CursorAction, Narration, HumanRequest, Input};
+```
+
+## The tool surface
+
+Exposed over MCP (JSON-RPC 2.0) as `browser_*`. Schemas + semantics mirror
+ImmorTerm's set, so a model that knows one knows both.
+
+| Tool | What it does |
+|------|--------------|
+| `browser_open` | Open/reuse the browser and navigate. Returns caption + PNG. |
+| `browser_read_page` | AX listing of the page as `[ref_N] role "name"` handles. |
+| `browser_find` | Ranked search for elements, same ref shape. |
+| `browser_click` | Click by `ref` (preferred) or `x`/`y`. |
+| `browser_form_input` | Set a field/checkbox/dropdown by `ref`. |
+| `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*. |
+| `browser_scroll` | Scroll by `dy` CSS pixels. |
+| `browser_screenshot` | Fresh CSS-pixel-accurate PNG. |
+| `browser_tabs_list` / `browser_tabs_switch` | Multi-tab / popup handling. |
+| `browser_upload` | Attach a local file to a file input by `ref`. |
+| `browser_console` / `browser_network` | Recent console + network entries. |
+| `browser_wait_for` | Wait for a selector and/or text (no blind sleeps). |
+| `browser_request_human` / `browser_wait_for_human` | Hand off + wait. |
+| `browser_close` | Kill the exact spawned browser process. |
+| `browser_eval` | **Gated** raw JS — only with `RUDDER_BROWSER_EVAL=1`. |
+
+Page content (listings, tabs, console, network) is framed as **untrusted** —
+data, not instructions.
+
+### Human handoff (passwords never reach the model)
+
+When rudder detects a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in screen, or
+a password/one-time-code field — or the agent calls `browser_request_human` —
+it **pauses**, sends a `browser_human_request` to the WS UI, and returns
+**text only** to the model (no screenshot). While paused the WS still streams
+the live view to the human, who solves it and clicks Continue.
+
+## The WS protocol
+
+On `--ws-port`, rudder serves JSON events to every connected client and accepts
+input back. Envelope `type` tags and field names:
+
+| Direction | `type` | Payload |
+|-----------|--------|---------|
+| → client | `browser_frame` | `png_base64`, `title`, `url`, `seq` |
+| → client | `browser_cursor` | `x`, `y`, `action` (`move`/`click`/`type`/`scroll`) |
+| → client | `browser_narration` | `text` |
+| → client | `browser_human_request` | `reason`, `instructions?` |
+| → client | `browser_state` | `paused` |
+| ← client | `{kind: "click", x, y}` | click on the live view (page CSS px) |
+| ← client | `{kind: "key", key}` | a key |
+| ← client | `{kind: "scroll", dy}` | wheel scroll |
+| ← client | `{kind: "control", action}` | `pause` / `continue` |
+
+Coordinates are **page CSS pixels**. The consumer un-letterboxes its rendered
+view to page space before sending clicks.
+
+## Configuration
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `RUDDER_HOME` | `~/.rudder` | Base dir for `browser.lock` + the persistent browser profile. |
+| `RUDDER_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
+| `RUDDER_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
+| `RUDDER_GITHUB_REPO` | `ImmorTerm/rudder` | Release source for the npm wrapper. |
+
+Only one real browser drives the shared profile at a time — a cross-process
+lock (`$RUDDER_HOME/browser.lock`) makes the first `serve` the owner; a later
+one that finds a live owner refuses rather than corrupting the profile.
+
+## Status / not-yet
+
+Solid:
+- CDP transport over a private pipe, navigate/click/key/type/scroll.
+- Ref-based AX listing (`read_page`/`find`), click/form-input by ref.
+- `Page.startScreencast` → live frame stream (WS) at ~15fps with coalescing.
+- Human-handoff detection (Cloudflare/CAPTCHA/OAuth/password) + frame
+  suppression to the model while paused.
+- Multi-tab / popup follow, console + network capture, file upload, wait-for.
+- One-browser-per-user ownership lock.
+
+Not yet:
+- **Cross-process routing.** The lock *detects* a live foreign owner and
+  refuses; it does not yet route a tool call to the owner's WS and mirror the
+  result. A non-owner gets a clear error. (See `src/browser_lock.rs`.)
+- **Windows.** POSIX only (the CDP pipe + process control use `nix`).
+- **darwin-x64.** The release matrix ships macOS **arm64** + Linux
+  x86_64/aarch64; build from source for Intel Mac.
+- The live screencast smoke test (`screencast_live_smoke`) is `#[ignore]`d —
+  it needs a real browser + network. Run it explicitly:
+  `cargo test -- --ignored screencast --test-threads=1`.
+
+## License
+
+MIT OR Apache-2.0.
