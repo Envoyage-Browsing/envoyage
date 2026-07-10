@@ -83,6 +83,7 @@ knows one knows both.
 | `browser_wait_for` | `selector?`, `text?`, `timeout_secs?` | text | Wait for a selector/text — no blind sleeps. |
 | `browser_request_human` | `reason?`, `instructions?` | text: wait cue | Hand off (pauses, banners the UI). |
 | `browser_wait_for_human` | `timeout_secs?` | text | Wait for the human to click ▶ Continue. |
+| `browser_gif` | `action`, `filename?`, `options?` | text: GIF path | Record a session (`start_recording`/`stop_recording`) and `export` an annotated animated GIF (`clear` drops it). Parity with claude-in-chrome's `gif_creator`; writes to `${RUDDER_HOME:-~/.rudder}/gif/` — serve/download that file. Vendor-neutral: no logo; `showWatermark` defaults false. |
 | `browser_close` | — | text | Kill the exact spawned browser. |
 | `browser_eval` | `js` | text | **Gated** — only if `RUDDER_BROWSER_EVAL=1`. |
 

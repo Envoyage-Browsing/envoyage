@@ -73,6 +73,7 @@ ImmorTerm's set, so a model that knows one knows both.
 | `browser_console` / `browser_network` | Recent console + network entries. |
 | `browser_wait_for` | Wait for a selector and/or text (no blind sleeps). |
 | `browser_request_human` / `browser_wait_for_human` | Hand off + wait. |
+| `browser_gif` | Record a session and export an annotated animated GIF. Parity with claude-in-chrome's `gif_creator`. |
 | `browser_close` | Kill the exact spawned browser process. |
 | `browser_eval` | **Gated** raw JS — only with `RUDDER_BROWSER_EVAL=1`. |
 
@@ -86,6 +87,27 @@ a password/one-time-code field — or the agent calls `browser_request_human` �
 it **pauses**, sends a `browser_human_request` to the WS UI, and returns
 **text only** to the model (no screenshot). While paused the WS still streams
 the live view to the human, who solves it and clicks Continue.
+
+### Recording GIFs (`browser_gif`)
+
+`browser_gif` mirrors claude-in-chrome's `gif_creator`, so a model that knows
+one already knows this. Flow:
+
+1. `browser_gif { action: "start_recording" }` — buffers the live screencast.
+2. Drive the browser with the other `browser_*` tools.
+3. `browser_gif { action: "stop_recording" }` — stops buffering, keeps frames.
+4. `browser_gif { action: "export", filename?, options? }` — composites overlays,
+   writes the GIF to `${RUDDER_HOME:-~/.rudder}/gif/<filename>`, and returns the
+   path. The consumer serves or downloads that file.
+5. `browser_gif { action: "clear" }` — drops the buffer.
+
+`options` (export only) mirror `gif_creator`: `showClickIndicators`,
+`showActionLabels`, `showProgressBar`, `showDragPaths`, `showWatermark`,
+`watermarkText`, `quality` (1–30, lower = better). All bool overlays default
+**true** except — rudder is **vendor-neutral** — `showWatermark` (default
+**false**) and `showDragPaths` (not yet implemented). There is **no baked-in
+logo**: a watermark renders only your own `watermarkText`. The buffer is capped
+(~600 frames); a truncation is logged, never silent.
 
 ## The WS protocol
 
