@@ -24,6 +24,7 @@
 pub mod browser;
 pub mod browser_lock;
 pub mod protocol;
+pub mod serve;
 
 pub use browser::{BrowserSession, HandoffReason};
 pub use browser_lock::{BrowserLock, Decision};
