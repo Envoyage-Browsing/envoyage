@@ -1,10 +1,19 @@
 name: Release
 
 # Builds the `rudder` binary for macOS arm64 + Linux x86_64/aarch64, then
-# creates a GitHub Release with the tarballs on THIS repo. The npm wrapper
-# (@immorterm/rudder) downloads these assets on postinstall.
+# publishes the npm packages (@immorterm/rudder + 3 platform packages) via
+# npm Trusted Publishing (OIDC). Mirrors immorterm-memory's publish lane:
+# platform binaries ship AS npm packages (optionalDependencies), so an
+# unauthenticated `npm install` never hits GitHub Releases — works for a
+# PRIVATE repo.
 #
-# Trigger manually. Asset names match npm/install.js: rudder-<os>-<arch>.tar.gz.
+# A GitHub Release with the tarballs is also created (handy for manual pulls).
+#
+# BEFORE FIRST PUBLISH: configure Trusted Publishing on npmjs.com for
+# @immorterm/rudder and each @immorterm/rudder-<platform> package, pointing at
+# this repo + this workflow file. No NPM_TOKEN secret is used.
+#
+# Trigger manually. Artifact names: rudder-<os>-<arch>.tar.gz.
 
 on:
   workflow_dispatch:
@@ -95,14 +104,20 @@ jobs:
           path: dist/${{ matrix.artifact_name }}.tar.gz
           retention-days: 14
 
-  release:
-    name: Publish Release
+  publish:
+    name: Publish npm + GitHub Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # create GitHub Release
+      id-token: write # npm Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -122,7 +137,76 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Release version: $VERSION"
 
-      - name: Stage release assets
+      - name: Stage binaries into platform packages + sync versions
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd npm
+          echo "Publishing @immorterm/rudder npm packages v${VERSION}"
+
+          # artifact name -> platform package dir
+          declare -A ARTIFACT_TO_PKG=(
+            ["rudder-linux-x86_64"]="rudder-linux-x64"
+            ["rudder-linux-aarch64"]="rudder-linux-arm64"
+            ["rudder-macos-aarch64"]="rudder-darwin-arm64"
+          )
+
+          for ARTIFACT in "${!ARTIFACT_TO_PKG[@]}"; do
+            PKG_DIR="packages/${ARTIFACT_TO_PKG[$ARTIFACT]}"
+            mkdir -p "$PKG_DIR/bin"
+            # download-artifact nests each under dl/<artifact_name>/
+            if [ -f "../dl/$ARTIFACT/$ARTIFACT.tar.gz" ]; then
+              tar xzf "../dl/$ARTIFACT/$ARTIFACT.tar.gz" -C "$PKG_DIR/bin/"
+              chmod +x "$PKG_DIR/bin/rudder"
+              echo "Extracted $ARTIFACT -> $PKG_DIR/bin/"
+            else
+              echo "::warning::Artifact $ARTIFACT.tar.gz not found, skipping ${ARTIFACT_TO_PKG[$ARTIFACT]}"
+            fi
+          done
+
+          # Sync version across platform packages
+          for PKG_DIR in packages/rudder-darwin-arm64 packages/rudder-linux-x64 packages/rudder-linux-arm64; do
+            node -e "
+              const p='./$PKG_DIR/package.json'; const pkg=require(p);
+              pkg.version='${VERSION}';
+              require('fs').writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
+          # Sync version + optionalDependencies in the meta package
+          node -e "
+            const p='./package.json'; const pkg=require(p);
+            pkg.version='${VERSION}';
+            for (const d of Object.keys(pkg.optionalDependencies || {})) pkg.optionalDependencies[d]='${VERSION}';
+            require('fs').writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish platform packages (npm Trusted Publishing)
+        run: |
+          set -euo pipefail
+          cd npm
+          # Platform packages first — the meta package's optionalDependencies resolve them.
+          for PKG_DIR in packages/rudder-linux-x64 packages/rudder-linux-arm64 packages/rudder-darwin-arm64; do
+            if [ -f "$PKG_DIR/bin/rudder" ]; then
+              echo "Publishing $(basename "$PKG_DIR")..."
+              (cd "$PKG_DIR" && npx -y npm@latest publish --provenance --access public) || echo "::warning::Failed to publish $(basename "$PKG_DIR")"
+            else
+              echo "::warning::Skipping $(basename "$PKG_DIR") — no binary"
+            fi
+          done
+
+      - name: Publish meta package (npm Trusted Publishing)
+        run: |
+          set -euo pipefail
+          cd npm
+          echo "Publishing @immorterm/rudder (meta)..."
+          npx -y npm@latest publish --provenance --access public
+          echo "npm publish complete"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p release
           for ARTIFACT in rudder-linux-x86_64 rudder-linux-aarch64 rudder-macos-aarch64; do
@@ -132,14 +216,6 @@ jobs:
               echo "::warning::Missing artifact $ARTIFACT"
             fi
           done
-          ls -la release/
-          [ "$(ls release/ | wc -l)" -gt 0 ] || { echo "::error::No release assets"; exit 1; }
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
           TAG="rudder-${VERSION}"
           gh release create "$TAG" release/* \
             --repo "$GITHUB_REPOSITORY" \
