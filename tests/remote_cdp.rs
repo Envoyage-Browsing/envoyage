@@ -16,6 +16,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -41,8 +42,9 @@ fn find_browser() -> Option<String> {
 }
 
 /// Spawn a headless Chromium with a TCP debug port (0 = OS-assigned) and a
-/// throwaway profile. Returns the child + the port it actually bound.
-fn spawn_debug_chromium(bin: &str) -> (Child, u16) {
+/// throwaway profile. Returns the child, the port it bound, and the profile dir
+/// (to clean up after teardown).
+fn spawn_debug_chromium(bin: &str) -> (Child, u16, std::path::PathBuf) {
     // Port 0 lets Chromium pick a free port; it writes the real one to
     // <profile>/DevToolsActivePort. We poll that file for the port.
     let profile = std::env::temp_dir().join(format!("rudder-remote-cdp-{}", std::process::id()));
@@ -59,6 +61,9 @@ fn spawn_debug_chromium(bin: &str) -> (Child, u16) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Own process group so teardown can reap the whole Chromium tree
+        // (launcher + renderers) via kill(-pid), leaving no orphan helpers.
+        .process_group(0)
         .spawn()
         .expect("spawn debug chromium");
 
@@ -75,7 +80,7 @@ fn spawn_debug_chromium(bin: &str) -> (Child, u16) {
         assert!(Instant::now() < deadline, "Chromium never wrote DevToolsActivePort");
         std::thread::sleep(Duration::from_millis(100));
     };
-    (child, port)
+    (child, port, profile)
 }
 
 /// Minimal `GET {path}` over raw TCP → the response body. Avoids adding an
@@ -138,7 +143,7 @@ fn connect_drives_remote_cdp_ws() {
         eprintln!("skipping: no Chromium-engine browser found");
         return;
     };
-    let (mut child, port) = spawn_debug_chromium(&bin);
+    let (mut child, port, profile) = spawn_debug_chromium(&bin);
 
     // The browser-level CDP WS URL comes from /json/version.
     let body = http_get(port, "/json/version");
@@ -185,7 +190,12 @@ fn connect_drives_remote_cdp_ws() {
         "remote browser was killed by close() — it must not touch a browser it didn't spawn"
     );
 
-    // Tear down the test-owned Chromium ourselves.
-    let _ = child.kill();
+    // Tear down the test-owned Chromium tree ourselves: SIGKILL the whole
+    // process group (launcher spawned it into its own group above) so no
+    // renderer helper is left orphaned, reap the leader, then drop the profile.
+    let pid = child.id() as i32;
+    // nix re-exports libc; no extra dev-dep needed.
+    unsafe { nix::libc::kill(-pid, nix::libc::SIGKILL) };
     let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&profile);
 }
