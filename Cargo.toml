@@ -1,0 +1,25 @@
+[package]
+name = "rudder"
+version = "0.1.0"
+edition = "2024"
+description = "Drive a real headless browser from any AI agent, live — with a mascot-neutral cursor/narration protocol."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ImmorTerm/rudder"
+
+[lib]
+name = "rudder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rudder"
+path = "src/bin/rudder.rs"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# libc::* (kill/close/fcntl/dup2) needs no feature; unistd::pipe needs "fs".
+nix = { version = "0.29", features = ["fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
