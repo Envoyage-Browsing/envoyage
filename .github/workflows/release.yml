@@ -1,0 +1,147 @@
+name: Release
+
+# Builds the `rudder` binary for macOS arm64 + Linux x86_64/aarch64, then
+# creates a GitHub Release with the tarballs on THIS repo. The npm wrapper
+# (@immorterm/rudder) downloads these assets on postinstall.
+#
+# Trigger manually. Asset names match npm/install.js: rudder-<os>-<arch>.tar.gz.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.1). Blank = version from Cargo.toml."
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: rudder-linux-x86_64
+            cross_packages: ""
+            cross_linker: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: rudder-linux-aarch64
+            cross_packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            cross_linker: aarch64-linux-gnu-gcc
+          # darwin-x64 (Intel Mac) intentionally omitted — keeps the matrix in
+          # step with immorterm-memory; Apple Silicon + Linux cover the users.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: rudder-macos-aarch64
+            cross_packages: ""
+            cross_linker: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-${{ matrix.target }}-rudder-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-${{ matrix.target }}-rudder-cargo-
+
+      - name: Install cross-compilation toolchain
+        if: matrix.cross_packages != ''
+        env:
+          CROSS_PACKAGES: ${{ matrix.cross_packages }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $CROSS_PACKAGES
+
+      - name: Build binary
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
+        run: cargo build --locked --release --target "$MATRIX_TARGET" -p rudder
+
+      - name: Package binary
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+        run: |
+          mkdir -p dist
+          cp "target/${MATRIX_TARGET}/release/rudder" dist/rudder
+          chmod +x dist/rudder
+          cd dist
+          tar czf "${ARTIFACT_NAME}.tar.gz" rudder
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}.tar.gz
+          retention-days: 14
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          for ARTIFACT in rudder-linux-x86_64 rudder-linux-aarch64 rudder-macos-aarch64; do
+            if [ -f "dl/$ARTIFACT/$ARTIFACT.tar.gz" ]; then
+              cp "dl/$ARTIFACT/$ARTIFACT.tar.gz" release/
+            else
+              echo "::warning::Missing artifact $ARTIFACT"
+            fi
+          done
+          ls -la release/
+          [ "$(ls release/ | wc -l)" -gt 0 ] || { echo "::error::No release assets"; exit 1; }
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          TAG="rudder-${VERSION}"
+          gh release create "$TAG" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "rudder ${VERSION}" \
+            --notes "rudder ${VERSION} — native binaries (macOS arm64, Linux x86_64/aarch64). Install: \`npx @immorterm/rudder serve\`."
