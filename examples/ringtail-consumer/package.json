@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Minimal example: consume rudder from a TS product — drive a browser via MCP and render frames + a (placeholder Rocco) mascot cursor.",
+  "description": "Minimal example: consume envoyage from a TS product — drive a browser via MCP and render frames + a (placeholder Rocco) mascot cursor.",
   "scripts": {
     "driver": "tsx driver.ts",
     "typecheck": "tsc --noEmit"

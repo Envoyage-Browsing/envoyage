@@ -1,14 +1,14 @@
-//! MCP Streamable HTTP transport (`rudder serve --http-port N`).
+//! MCP Streamable HTTP transport (`envoyage serve --http-port N`).
 //!
 //! Mirrors the shape immorterm-memory uses: a single POST endpoint that parses
 //! one JSON-RPC 2.0 request, dispatches it through the SAME [`mcp::handle_request`]
 //! the stdio transport uses (same tools, same browser), and replies with either
 //! plain JSON or an SSE `event: message` frame depending on the client's Accept
 //! header. GET/DELETE are 405 — this is a request/response transport, no long-
-//! lived server→client SSE stream (rudder's live view is the WS frame stream,
+//! lived server→client SSE stream (envoyage's live view is the WS frame stream,
 //! not the MCP channel).
 //!
-//! Remote = untrusted network, so a bearer token (`RUDDER_AUTH_TOKEN`) gates
+//! Remote = untrusted network, so a bearer token (`ENVOYAGE_AUTH_TOKEN`) gates
 //! every request when set. Unset → no auth (local dev).
 
 use crate::serve::mcp;
@@ -26,9 +26,9 @@ struct HttpState {
     auth_token: Option<String>,
 }
 
-/// Bind `127.0.0.1:port` (or `0.0.0.0` when `RUDDER_HTTP_HOST` is set) and serve
+/// Bind `127.0.0.1:port` (or `0.0.0.0` when `ENVOYAGE_HTTP_HOST` is set) and serve
 /// MCP over Streamable HTTP until the process exits. `auth_token` is `Some` when
-/// `RUDDER_AUTH_TOKEN` is set — every request must then carry
+/// `ENVOYAGE_AUTH_TOKEN` is set — every request must then carry
 /// `Authorization: Bearer <token>`.
 pub async fn run(port: u16, auth_token: Option<String>) -> std::io::Result<()> {
     let state = Arc::new(HttpState { auth_token });
@@ -42,10 +42,10 @@ pub async fn run(port: u16, auth_token: Option<String>) -> std::io::Result<()> {
         .with_state(state);
 
     // Default to loopback; opt into 0.0.0.0 for a hosted deployment.
-    let host = std::env::var("RUDDER_HTTP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let host = std::env::var("ENVOYAGE_HTTP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("rudder: MCP Streamable HTTP on http://{addr}/mcp");
+    eprintln!("envoyage: MCP Streamable HTTP on http://{addr}/mcp");
     axum::serve(listener, app).await
 }
 

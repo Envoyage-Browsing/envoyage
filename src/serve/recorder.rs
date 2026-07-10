@@ -2,23 +2,23 @@
 //!
 //! Mirrors claude-in-chrome's `gif_creator`: record a browser-automation session
 //! (`start_recording` → buffer screencast frames → `stop_recording`) and
-//! `export` an annotated animated GIF; `clear` drops the buffer. rudder is
+//! `export` an annotated animated GIF; `clear` drops the buffer. envoyage is
 //! **vendor-neutral**: there is NO baked-in logo. `showWatermark` defaults false;
 //! when requested it renders a caller-supplied neutral text string (empty by
-//! default) — the consumer brands it, never rudder.
+//! default) — the consumer brands it, never envoyage.
 //!
 //! Overlays composited on export, each toggled by an `options` flag:
 //! - `showClickIndicators` — an orange ring at the action's click point.
 //! - `showActionLabels`    — a small text label (the narration) for the action.
 //! - `showProgressBar`     — an orange bar along the bottom, scaled to progress.
 //! - `showWatermark`       — neutral configurable text (empty ⇒ nothing drawn).
-//! - `showDragPaths`       — TODO(rudder): rudder has no drag primitive yet.
+//! - `showDragPaths`       — TODO(envoyage): envoyage has no drag primitive yet.
 //!
 //! The frame source is the pump: it appends each broadcast PNG here while
 //! recording, tagging it with whatever overlay hint the last MCP action left
 //! pending (see `state::record_frame` / `state::record_overlay`).
 
-use crate::browser_lock::rudder_home;
+use crate::browser_lock::envoyage_home;
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame as GifFrame, Rgba, RgbaImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_circle_mut};
@@ -135,7 +135,7 @@ impl Recording {
             if !self.truncated {
                 self.truncated = true;
                 eprintln!(
-                    "rudder: browser_gif buffer hit {MAX_FRAMES} frames — dropping oldest \
+                    "envoyage: browser_gif buffer hit {MAX_FRAMES} frames — dropping oldest \
                      (the GIF will cover only the most recent ~{}s).",
                     MAX_FRAMES / 15
                 );
@@ -146,14 +146,14 @@ impl Recording {
     }
 
     /// `export`: composite overlays and write an annotated animated GIF to
-    /// `${RUDDER_HOME:-~/.rudder}/gif/<filename>`. Returns the written path.
+    /// `${ENVOYAGE_HOME:-~/.envoyage}/gif/<filename>`. Returns the written path.
     pub fn export(&mut self, filename: Option<&str>, opts: &ExportOptions) -> Result<PathBuf, String> {
-        let dir = rudder_home().join("gif");
+        let dir = envoyage_home().join("gif");
         self.export_to_dir(&dir, filename, opts)
     }
 
     /// Write the GIF into an explicit directory (env-free; used by tests and by
-    /// `export`, which passes `${RUDDER_HOME}/gif`).
+    /// `export`, which passes `${ENVOYAGE_HOME}/gif`).
     fn export_to_dir(
         &mut self,
         dir: &std::path::Path,
@@ -274,7 +274,7 @@ fn composite_overlays(
         draw_filled_rect_mut(img, Rect::at(0, y).of_size(filled.max(0) as u32, bar_h as u32), ORANGE);
     }
 
-    // showDragPaths: TODO(rudder) — no drag primitive in the tool surface yet.
+    // showDragPaths: TODO(envoyage) — no drag primitive in the tool surface yet.
 
     if opts.show_watermark && !opts.watermark_text.is_empty() {
         draw_watermark(img, &opts.watermark_text);
@@ -545,9 +545,9 @@ mod tests {
     #[test]
     fn export_writes_valid_animated_gif() {
         // Env-free: write into an explicit temp dir (avoids racing the global
-        // RUDDER_HOME with the browser_lock tests when run in parallel).
+        // ENVOYAGE_HOME with the browser_lock tests when run in parallel).
         let dir = std::env::temp_dir().join(format!(
-            "rudder-gif-test-{}-{:?}",
+            "envoyage-gif-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -593,7 +593,7 @@ mod tests {
     /// Live smoke: launch a REAL headless browser, record ~1s of its screencast
     /// into a `Recording`, export, and assert a valid multi-frame GIF. Ignored by
     /// default — needs a Chromium-engine browser. Run with:
-    ///   cargo test -p rudder -- --ignored gif_live_smoke
+    ///   cargo test -p envoyage -- --ignored gif_live_smoke
     #[test]
     #[ignore = "needs a real browser; run explicitly"]
     fn gif_live_smoke() {
@@ -620,7 +620,7 @@ mod tests {
         rec.stop();
         assert!(rec.frame_count() > 1, "expected >1 recorded frame, got {}", rec.frame_count());
 
-        let dir = std::env::temp_dir().join(format!("rudder-gif-live-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("envoyage-gif-live-{}", std::process::id()));
         let path = rec.export_to_dir(&dir, Some("live.gif"), &ExportOptions::default()).expect("export");
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..6], b"GIF89a", "GIF89a magic bytes");

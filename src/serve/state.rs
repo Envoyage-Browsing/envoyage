@@ -1,8 +1,8 @@
 //! Process-global browser state, pause flag, and the WS<->pump channels.
 //!
-//! rudder collapses ImmorTerm's two-process split (browser in the MCP process,
+//! envoyage collapses ImmorTerm's two-process split (browser in the MCP process,
 //! panel in the daemon): here the browser, the MCP tools, the screencast pump,
-//! and the WS server all live in ONE `rudder serve` process. So the pump reads
+//! and the WS server all live in ONE `envoyage serve` process. So the pump reads
 //! frames straight off the in-process [`BrowserSession`] (no IPC) and pushes
 //! protocol events onto a broadcast channel; WS clients subscribe to it and
 //! feed [`protocol::Input`] back through an input queue the pump drains.
@@ -37,7 +37,7 @@ pub fn cdp_url() -> Option<&'static str> {
     CDP_URL.get().and_then(|o| o.as_deref())
 }
 
-/// Paused flag toggled by the human via the WS UI. While paused rudder still
+/// Paused flag toggled by the human via the WS UI. While paused envoyage still
 /// streams frames + forwards the human's input, but MCP tools return text-only
 /// (no screenshot to the model — passwords never leave to the LLM).
 static PAUSED: AtomicBool = AtomicBool::new(false);

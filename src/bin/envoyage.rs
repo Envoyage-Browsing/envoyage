@@ -1,13 +1,13 @@
-//! `rudder` CLI. One subcommand: `serve`.
+//! `envoyage` CLI. One subcommand: `serve`.
 //!
-//!   rudder serve                     MCP over stdio (default)
-//!   rudder serve --mcp               MCP over stdio (explicit)
-//!   rudder serve --ws-port 8787      also stream frames over WS
-//!   rudder serve --http-port 8788    also serve MCP over Streamable HTTP
-//!   rudder serve --cdp-url wss://…   drive a REMOTE browser (no local spawn)
-//!   rudder serve --ws-port 8787 --mcp   both
+//!   envoyage serve                     MCP over stdio (default)
+//!   envoyage serve --mcp               MCP over stdio (explicit)
+//!   envoyage serve --ws-port 8787      also stream frames over WS
+//!   envoyage serve --http-port 8788    also serve MCP over Streamable HTTP
+//!   envoyage serve --cdp-url wss://…   drive a REMOTE browser (no local spawn)
+//!   envoyage serve --ws-port 8787 --mcp   both
 
-use rudder::serve::{self, Options};
+use envoyage::serve::{self, Options};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -16,12 +16,12 @@ fn main() {
             let opts = match parse_serve(&args[1..]) {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!("rudder: {e}\n\n{USAGE}");
+                    eprintln!("envoyage: {e}\n\n{USAGE}");
                     std::process::exit(2);
                 }
             };
             if let Err(e) = serve::run(opts) {
-                eprintln!("rudder: {e}");
+                eprintln!("envoyage: {e}");
                 std::process::exit(1);
             }
         }
@@ -29,10 +29,10 @@ fn main() {
             println!("{USAGE}");
         }
         Some("-V") | Some("--version") => {
-            println!("rudder {}", env!("CARGO_PKG_VERSION"));
+            println!("envoyage {}", env!("CARGO_PKG_VERSION"));
         }
         Some(other) => {
-            eprintln!("rudder: unknown command '{other}'\n\n{USAGE}");
+            eprintln!("envoyage: unknown command '{other}'\n\n{USAGE}");
             std::process::exit(2);
         }
     }
@@ -69,10 +69,10 @@ fn parse_serve(args: &[String]) -> Result<Options, String> {
 }
 
 const USAGE: &str = "\
-rudder — drive a real browser from any AI agent, live.
+envoyage — drive a real browser from any AI agent, live.
 
 USAGE:
-    rudder serve [--mcp] [--ws-port <PORT>] [--http-port <PORT>] [--cdp-url <URL>]
+    envoyage serve [--mcp] [--ws-port <PORT>] [--http-port <PORT>] [--cdp-url <URL>]
 
 OPTIONS:
     --mcp               Serve MCP (JSON-RPC 2.0) over stdio. Default when no
@@ -80,8 +80,8 @@ OPTIONS:
     --ws-port <PORT>    Also stream frames + accept input over WS on
                         127.0.0.1:<PORT>. Pass with --mcp to serve both.
     --http-port <PORT>  Also serve MCP over Streamable HTTP (POST /mcp) for a
-                        remote agent. Bind host via RUDDER_HTTP_HOST (default
-                        127.0.0.1). Bearer auth via RUDDER_AUTH_TOKEN.
+                        remote agent. Bind host via ENVOYAGE_HTTP_HOST (default
+                        127.0.0.1). Bearer auth via ENVOYAGE_AUTH_TOKEN.
     --cdp-url <URL>     Drive a REMOTE browser at this CDP WebSocket URL
                         (ws://…/wss://…) instead of spawning a local Chromium —
                         e.g. a Cloudflare Browser Run endpoint.
@@ -89,8 +89,8 @@ OPTIONS:
     -V, --version       Show version.
 
 ENV:
-    RUDDER_HOME          Base dir for browser.lock + profile (default ~/.rudder).
-    RUDDER_BROWSER_BIN   Path to a Chromium/Chrome/Brave/Edge binary override.
-    RUDDER_BROWSER_EVAL  Set to 1 to expose the gated browser_eval tool.
-    RUDDER_AUTH_TOKEN    If set, --http-port requires Authorization: Bearer it.
-    RUDDER_HTTP_HOST     Bind host for --http-port (default 127.0.0.1).";
+    ENVOYAGE_HOME          Base dir for browser.lock + profile (default ~/.envoyage).
+    ENVOYAGE_BROWSER_BIN   Path to a Chromium/Chrome/Brave/Edge binary override.
+    ENVOYAGE_BROWSER_EVAL  Set to 1 to expose the gated browser_eval tool.
+    ENVOYAGE_AUTH_TOKEN    If set, --http-port requires Authorization: Bearer it.
+    ENVOYAGE_HTTP_HOST     Bind host for --http-port (default 127.0.0.1).";

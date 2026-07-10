@@ -57,7 +57,7 @@ pub fn with_browser<T>(
                 browser_lock::decide(browser_lock::read().as_ref(), self_pid)
             {
                 return Err(format!(
-                    "rudder's browser is already open and owned by another session \
+                    "envoyage's browser is already open and owned by another session \
                      (pid {owner_pid}). Use that session's browser, or close it first."
                 ));
             }
@@ -125,7 +125,7 @@ pub fn ensure_pump() {
         return;
     }
     std::thread::Builder::new()
-        .name("rudder-screencast-pump".into())
+        .name("envoyage-screencast-pump".into())
         .spawn(pump_loop)
         .ok();
 }

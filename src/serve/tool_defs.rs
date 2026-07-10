@@ -1,14 +1,14 @@
 // Included into mcp.rs. Schemas + descriptions mirror ImmorTerm's
 // `immorterm_browser_*` set (names neutralized to `browser_*`, the ImmorTerm-
-// specific `session` mirror param dropped — rudder drives one browser).
+// specific `session` mirror param dropped — envoyage drives one browser).
 
 /// The tool list returned by `tools/list`. `browser_eval` is appended only when
-/// `RUDDER_BROWSER_EVAL=1`.
+/// `ENVOYAGE_BROWSER_EVAL=1`.
 fn tool_defs() -> Vec<Value> {
     let mut defs = vec![
         json!({
             "name": "browser_open",
-            "description": "Open (or reuse) rudder's self-driven browser and navigate to a URL. Returns a caption plus a CSS-pixel-accurate PNG. The browser runs headless with a persistent profile — for a login, hand off to the human via browser_request_human so THEY sign in. Only http, https, and about:blank are allowed. NEVER type passwords, payment info, or other secrets via these tools.",
+            "description": "Open (or reuse) envoyage's self-driven browser and navigate to a URL. Returns a caption plus a CSS-pixel-accurate PNG. The browser runs headless with a persistent profile — for a login, hand off to the human via browser_request_human so THEY sign in. Only http, https, and about:blank are allowed. NEVER type passwords, payment info, or other secrets via these tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -45,7 +45,7 @@ fn tool_defs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "ref": { "type": "string", "description": "A ref_N handle from read_page/find. rudder clicks the element's center." },
+                    "ref": { "type": "string", "description": "A ref_N handle from read_page/find. envoyage clicks the element's center." },
                     "x": { "type": "number", "description": "Fallback: X in CSS pixels of the last screenshot." },
                     "y": { "type": "number", "description": "Fallback: Y in CSS pixels of the last screenshot." }
                 },
@@ -110,7 +110,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "browser_close",
-            "description": "Close rudder's self-driven browser — kills the exact browser process it spawned and clears state. The next browser_open launches a fresh one. Never touches the user's normal browser.",
+            "description": "Close envoyage's self-driven browser — kills the exact browser process it spawned and clears state. The next browser_open launches a fresh one. Never touches the user's normal browser.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         json!({
@@ -162,7 +162,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "browser_gif",
-            "description": "Record a browser-automation session and export it as an annotated animated GIF (parity with claude-in-chrome's gif_creator). Flow: 'start_recording' begins buffering the live screencast; drive the browser with the other browser_* tools; 'stop_recording' stops buffering (frames are kept); 'export' composites the requested overlays and WRITES a .gif under ${RUDDER_HOME:-~/.rudder}/gif/, returning its absolute path (the consumer serves/downloads that file); 'clear' drops the buffer. rudder is vendor-neutral: there is NO baked-in logo — showWatermark defaults false and, if enabled, renders only the caller-supplied neutral 'watermarkText'.",
+            "description": "Record a browser-automation session and export it as an annotated animated GIF (parity with claude-in-chrome's gif_creator). Flow: 'start_recording' begins buffering the live screencast; drive the browser with the other browser_* tools; 'stop_recording' stops buffering (frames are kept); 'export' composites the requested overlays and WRITES a .gif under ${ENVOYAGE_HOME:-~/.envoyage}/gif/, returning its absolute path (the consumer serves/downloads that file); 'clear' drops the buffer. envoyage is vendor-neutral: there is NO baked-in logo — showWatermark defaults false and, if enabled, renders only the caller-supplied neutral 'watermarkText'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -182,9 +182,9 @@ fn tool_defs() -> Vec<Value> {
                             "showClickIndicators": { "type": "boolean", "description": "Orange ring at each click point (default true)." },
                             "showActionLabels": { "type": "boolean", "description": "Text label describing each action, from the narration (default true)." },
                             "showProgressBar": { "type": "boolean", "description": "Orange progress bar along the bottom (default true)." },
-                            "showDragPaths": { "type": "boolean", "description": "Drag-path trails (default false; not yet implemented in rudder)." },
-                            "showWatermark": { "type": "boolean", "description": "Render 'watermarkText' as a neutral watermark (default false — rudder ships no logo)." },
-                            "watermarkText": { "type": "string", "description": "Neutral watermark text (default empty). The consumer brands it; rudder never does." },
+                            "showDragPaths": { "type": "boolean", "description": "Drag-path trails (default false; not yet implemented in envoyage)." },
+                            "showWatermark": { "type": "boolean", "description": "Render 'watermarkText' as a neutral watermark (default false — envoyage ships no logo)." },
+                            "watermarkText": { "type": "string", "description": "Neutral watermark text (default empty). The consumer brands it; envoyage never does." },
                             "quality": { "type": "integer", "description": "1-30, lower = better quality (default 10)." }
                         }
                     }

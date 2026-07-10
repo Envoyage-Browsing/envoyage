@@ -1,10 +1,10 @@
-//! The mascot-neutral event protocol — rudder's customization seam.
+//! The mascot-neutral event protocol — envoyage's customization seam.
 //!
-//! rudder drives a real browser and streams what it sees + what it's about to
+//! envoyage drives a real browser and streams what it sees + what it's about to
 //! do. It draws NOTHING itself: no cursor sprite, no mascot, no balloon. A
 //! consumer renders these events however it likes — ImmorTerm glides *Mort* the
 //! axolotl to the cursor point and shows the narration in an axolotl balloon;
-//! ringtail glides *Rocco* the ringtail. Bring your own mascot; rudder gives you
+//! ringtail glides *Rocco* the ringtail. Bring your own mascot; envoyage gives you
 //! the coordinates and the intent, you skin them.
 //!
 //! # Wire compatibility
@@ -13,7 +13,7 @@
 //! (`browser_frame` / `browser_state` / `browser_human_request` / `browser_cursor`
 //! / `browser_narration`) and the input events its panel sends back
 //! (`browser_input` kinds: click / key / scroll / control). This is deliberate:
-//! ImmorTerm can drop rudder in behind its existing renderer with no wire change.
+//! ImmorTerm can drop envoyage in behind its existing renderer with no wire change.
 
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,7 @@ impl Narration {
     }
 }
 
-/// Handoff signal: rudder hit something a human must solve (Cloudflare/CAPTCHA,
+/// Handoff signal: envoyage hit something a human must solve (Cloudflare/CAPTCHA,
 /// an OAuth/sign-in screen, a password or one-time-code field). The consumer
 /// banners its UI and lets the human drive; passwords never reach the model.
 ///
@@ -128,7 +128,7 @@ impl HumanRequest {
     }
 }
 
-/// The AI-driving pause state. When `paused`, a human is driving; rudder keeps
+/// The AI-driving pause state. When `paused`, a human is driving; envoyage keeps
 /// streaming frames to the human UI but returns text-only to the model.
 ///
 /// Wire tag: `browser_state`.

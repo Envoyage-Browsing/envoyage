@@ -1,13 +1,13 @@
-//! # rudder
+//! # envoyage
 //!
 //! Drive a real browser from any AI agent, live.
 //!
-//! rudder launches a headless Chromium over a private CDP pipe and exposes a
+//! envoyage launches a headless Chromium over a private CDP pipe and exposes a
 //! small, ref-based tool surface (navigate / read / find / click / type / key /
 //! scroll / screenshot / tabs / upload / console / network / wait / human-handoff).
 //! It streams a live screencast plus a **mascot-neutral** cursor/narration
 //! protocol so a consumer can render its own animated cursor over the live view.
-//! rudder draws nothing itself — see [`protocol`] for the customization seam.
+//! envoyage draws nothing itself — see [`protocol`] for the customization seam.
 //!
 //! ## Layout
 //! - [`BrowserSession`] — the CDP driver (launch, navigate, refs, screencast,

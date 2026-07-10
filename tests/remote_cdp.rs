@@ -1,5 +1,5 @@
 //! Remote-CDP transport smoke: prove `BrowserSession::connect(ws_url)` can drive
-//! a browser rudder did NOT spawn, over a CDP WebSocket.
+//! a browser envoyage did NOT spawn, over a CDP WebSocket.
 //!
 //! We host the CDP endpoint LOCALLY so the test needs no cloud account: spawn a
 //! headless Chromium with `--remote-debugging-port=0` (TCP, so it exposes a
@@ -10,7 +10,7 @@
 //! against CF too (only the URL + auth differ; the consumer supplies those).
 //!
 //! Ignored by default (needs a real Chromium). Run with:
-//!   cargo test -p rudder --test remote_cdp -- --ignored
+//!   cargo test -p envoyage --test remote_cdp -- --ignored
 
 #![cfg(test)]
 
@@ -20,13 +20,13 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use rudder::BrowserSession;
+use envoyage::BrowserSession;
 
 /// Locate a Chromium-engine browser the same way the library does (env override
 /// first, then the usual macOS bundle / PATH names). Kept minimal — this is
 /// test scaffolding, not the production locator.
 fn find_browser() -> Option<String> {
-    if let Ok(bin) = std::env::var("RUDDER_BROWSER_BIN")
+    if let Ok(bin) = std::env::var("ENVOYAGE_BROWSER_BIN")
         && !bin.is_empty()
         && std::path::Path::new(&bin).exists()
     {
@@ -47,7 +47,7 @@ fn find_browser() -> Option<String> {
 fn spawn_debug_chromium(bin: &str) -> (Child, u16, std::path::PathBuf) {
     // Port 0 lets Chromium pick a free port; it writes the real one to
     // <profile>/DevToolsActivePort. We poll that file for the port.
-    let profile = std::env::temp_dir().join(format!("rudder-remote-cdp-{}", std::process::id()));
+    let profile = std::env::temp_dir().join(format!("envoyage-remote-cdp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&profile);
     std::fs::create_dir_all(&profile).unwrap();
 

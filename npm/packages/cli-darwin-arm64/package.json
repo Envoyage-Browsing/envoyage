@@ -1,0 +1,20 @@
+{
+  "name": "@envoyage/cli-darwin-arm64",
+  "version": "0.1.0",
+  "description": "envoyage binary for macOS ARM64 (Apple Silicon)",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Envoyage-Browsing/envoyage.git",
+    "directory": "npm/packages/cli-darwin-arm64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin"
+  ]
+}

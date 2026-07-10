@@ -1,9 +1,9 @@
-# Rudder in ringtail — glide Rocco to the agent's cursor
+# Envoyage in ringtail — glide Rocco to the agent's cursor
 
 A ringtail-specific walkthrough: give ringtail's agent a live browser it can
 drive, show that browser in the cockpit, and glide **Rocco** to exactly where
 the agent is about to click. This mirrors what ImmorTerm does with **Mort** —
-same rudder, different mascot.
+same envoyage, different mascot.
 
 > Read [`README.md`](README.md) first for the two surfaces and the coordinate
 > mapping. This doc is the ringtail wiring; the runnable code is in
@@ -11,25 +11,25 @@ same rudder, different mascot.
 
 ## Where it fits in ringtail's stack
 
-ringtail already has the two pieces rudder needs:
+ringtail already has the two pieces envoyage needs:
 
 - **MCP client path.** ringtail depends on `@modelcontextprotocol/sdk`
   (`^1.29.0`) and its daemon already speaks MCP (as a *server*, over Streamable
-  HTTP). For rudder you use the SDK as a **client** over **stdio** — you spawn
-  `rudder serve` and talk to it. Same SDK, other direction.
+  HTTP). For envoyage you use the SDK as a **client** over **stdio** — you spawn
+  `envoyage serve` and talk to it. Same SDK, other direction.
 - **A live cockpit.** `apps/dashboard` is React 18 + Vite and already renders
-  from a live event stream (the daemon's SSE snapshot). rudder's WS frame
+  from a live event stream (the daemon's SSE snapshot). envoyage's WS frame
   stream slots in the same way: subscribe, render frames, place Rocco.
 
 So the integration is two wires:
 
-1. **daemon side** — the ringtail agent runtime spawns `rudder serve` and
+1. **daemon side** — the ringtail agent runtime spawns `envoyage serve` and
    exposes its `browser_*` tools to Gemini.
-2. **dashboard side** — the cockpit opens the rudder WS, paints frames onto a
+2. **dashboard side** — the cockpit opens the envoyage WS, paints frames onto a
    `<canvas>`, and glides the existing `Rocco` component to each
    `browser_cursor`.
 
-## 1 — Spawn rudder as an MCP server (daemon side)
+## 1 — Spawn envoyage as an MCP server (daemon side)
 
 ### Raw MCP SDK (stdio client)
 
@@ -37,23 +37,23 @@ So the integration is two wires:
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// Spawn `rudder serve` and stream frames to the cockpit on 8787.
+// Spawn `envoyage serve` and stream frames to the cockpit on 8787.
 const transport = new StdioClientTransport({
   command: "npx",
-  args: ["-y", "@immorterm/rudder", "serve", "--mcp", "--ws-port", "8787"],
-  // stdout/stdin are the JSON-RPC pipe; rudder logs go to stderr.
+  args: ["-y", "@envoyage/cli", "serve", "--mcp", "--ws-port", "8787"],
+  // stdout/stdin are the JSON-RPC pipe; envoyage logs go to stderr.
 });
 
-const rudder = new Client({ name: "ringtail", version: "0.0.0" });
-await rudder.connect(transport);
+const envoyage = new Client({ name: "ringtail", version: "0.0.0" });
+await envoyage.connect(transport);
 
-const { tools } = await rudder.listTools(); // the browser_* surface
+const { tools } = await envoyage.listTools(); // the browser_* surface
 // hand these to Gemini's tool loop (below), then:
-//   await rudder.callTool({ name: "browser_open", arguments: { url } });
+//   await envoyage.callTool({ name: "browser_open", arguments: { url } });
 ```
 
 ringtail spawns other agents as CLIs already (see `services/daemon/src/agents.ts`),
-so spawning `rudder serve` as a child is the same shape it uses elsewhere.
+so spawning `envoyage serve` as a child is the same shape it uses elsewhere.
 
 ### Vercel AI SDK path (Gemini)
 
@@ -69,7 +69,7 @@ import { google } from "@ai-sdk/google"; // GEMINI_API_KEY / Vertex creds
 const mcp = await experimental_createMCPClient({
   transport: new Experimental_StdioMCPTransport({
     command: "npx",
-    args: ["-y", "@immorterm/rudder", "serve", "--mcp", "--ws-port", "8787"],
+    args: ["-y", "@envoyage/cli", "serve", "--mcp", "--ws-port", "8787"],
   }),
 });
 
@@ -90,18 +90,18 @@ const res = await generateText({
 await mcp.close();
 ```
 
-Either path drives the **same** rudder process, and because you passed
+Either path drives the **same** envoyage process, and because you passed
 `--ws-port 8787`, every `browser_open`/`click`/`scroll` also streams frames +
 cursor events to the cockpit — no extra call needed.
 
-> **Secrets stay out of Gemini.** rudder returns *text only* while paused, and
+> **Secrets stay out of Gemini.** envoyage returns *text only* while paused, and
 > the tool descriptions tell the model to hand off for passwords/OTP. Combined
 > with ringtail's own "🔒 goes to Ringtail, not the agent" paste model, no
 > credential the human types ever enters a Gemini prompt.
 
 ## 2 — Render frames + glide Rocco (dashboard side)
 
-The cockpit opens the rudder WS and renders it exactly like it already renders
+The cockpit opens the envoyage WS and renders it exactly like it already renders
 the daemon's live snapshot — a subscribe-and-paint loop. The one ringtail-
 specific bit: at each `browser_cursor`, move the existing `Rocco` component to
 the mapped point and give it a pose.
@@ -165,7 +165,7 @@ export function BrowserView({ wsUrl }: { wsUrl: string }) {
       }
     };
 
-    // Human clicks on the live view → page px → send back to rudder.
+    // Human clicks on the live view → page px → send back to envoyage.
     const cv = canvasRef.current!;
     cv.onclick = (ev) => {
       const r = cv.getBoundingClientRect();
@@ -218,19 +218,19 @@ loop per `browser_cursor.action`. That is the entire mascot integration.
 
 ## 3 — The human-handoff UX
 
-When rudder pauses (auto-detected bot-check / OAuth / password field, or an
+When envoyage pauses (auto-detected bot-check / OAuth / password field, or an
 explicit `browser_request_human`):
 
 - **Banner** — show `browser_human_request.reason` over the live view (the
   snippet above does this).
-- **Let the human drive** — keep painting `browser_frame` (rudder still streams
+- **Let the human drive** — keep painting `browser_frame` (envoyage still streams
   the live view while paused) and forward the human's `click`/`key`/`scroll`
   input. This reuses ringtail's existing paste-is-sacred instinct: the human
   interacts with the *real page*, the agent is frozen.
 - **Continue** — the ▶ button sends `{kind:"control", action:"continue"}`;
-  rudder flips `paused` back, broadcasts `browser_state {paused:false}`, and the
+  envoyage flips `paused` back, broadcasts `browser_state {paused:false}`, and the
   agent's `browser_wait_for_human` call returns.
-- **Passwords never reach Gemini** — while paused rudder returns text-only to
+- **Passwords never reach Gemini** — while paused envoyage returns text-only to
   the model and suppresses the screenshot. The human's keystrokes go over the
   WS input channel straight into the browser, bypassing the model entirely.
   This is the same guarantee ringtail's `check:no-leak` enforces for pasted
@@ -238,11 +238,11 @@ explicit `browser_request_human`):
 
 ## Putting it together
 
-1. Daemon spawns `rudder serve --mcp --ws-port 8787`, exposes `browser_*` to
+1. Daemon spawns `envoyage serve --mcp --ws-port 8787`, exposes `browser_*` to
    Gemini (either MCP path above).
 2. Cockpit opens `ws://127.0.0.1:8787`, paints frames, glides Rocco.
-3. Gemini drives; Rocco narrates; on a login screen rudder hands off and the
+3. Gemini drives; Rocco narrates; on a login screen envoyage hands off and the
    human finishes it in the cockpit — no secret ever touches the model.
 
 Swap `Rocco` for `Mort` and this is ImmorTerm. That swap is the whole point of
-rudder's mascot-neutral protocol.
+envoyage's mascot-neutral protocol.

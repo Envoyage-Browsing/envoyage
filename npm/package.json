@@ -1,9 +1,9 @@
 {
-  "name": "@immorterm/rudder",
+  "name": "@envoyage/cli",
   "version": "0.1.0",
   "description": "Drive a real browser from any AI agent, live — headless Chromium over CDP with a mascot-neutral cursor/narration protocol.",
   "bin": {
-    "rudder": "bin/rudder"
+    "envoyage": "bin/envoyage"
   },
   "files": [
     "bin",
@@ -16,13 +16,13 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@immorterm/rudder-darwin-arm64": "0.1.0",
-    "@immorterm/rudder-linux-x64": "0.1.0",
-    "@immorterm/rudder-linux-arm64": "0.1.0"
+    "@envoyage/cli-darwin-arm64": "0.1.0",
+    "@envoyage/cli-linux-x64": "0.1.0",
+    "@envoyage/cli-linux-arm64": "0.1.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/ImmorTerm/rudder.git"
+    "url": "https://github.com/Envoyage-Browsing/envoyage.git"
   },
   "license": "MIT OR Apache-2.0",
   "keywords": [

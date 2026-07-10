@@ -1,0 +1,20 @@
+{
+  "name": "@envoyage/cli-linux-x64",
+  "version": "0.1.0",
+  "description": "envoyage binary for Linux x86_64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Envoyage-Browsing/envoyage.git",
+    "directory": "npm/packages/cli-linux-x64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ]
+}

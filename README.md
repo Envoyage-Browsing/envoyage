@@ -1,19 +1,19 @@
-# rudder
+# envoyage
 
 **Drive a real browser from any AI agent — live.**
 
-rudder launches a headless Chromium over a private CDP pipe and gives an AI
+envoyage launches a headless Chromium over a private CDP pipe and gives an AI
 agent a small, ref-based tool surface to navigate, read, click, type, scroll,
 upload, switch tabs, and hand off to a human. It streams a live screencast plus
 a **mascot-neutral** cursor/narration protocol so a UI can render its own
 animated cursor gliding to exactly where the agent is about to act.
 
-rudder draws **nothing** itself. It gives you the frame, the cursor point, and
+envoyage draws **nothing** itself. It gives you the frame, the cursor point, and
 the intent string — you skin them.
 
 ## Bring your own mascot
 
-This is the whole point. rudder emits *what happened* and *what's about to
+This is the whole point. envoyage emits *what happened* and *what's about to
 happen* as vendor-neutral events. The consumer renders them however it likes:
 
 | Consumer | Mascot it glides to the cursor point |
@@ -22,7 +22,7 @@ happen* as vendor-neutral events. The consumer renders them however it likes:
 | ringtail | **Rocco** the ringtail |
 | _yours_ | _whatever you draw_ |
 
-rudder ships no cursor sprite, no balloon, no branding. See
+envoyage ships no cursor sprite, no balloon, no branding. See
 [`src/protocol.rs`](src/protocol.rs) — the customization seam.
 
 ## Quickstart
@@ -30,15 +30,15 @@ rudder ships no cursor sprite, no balloon, no branding. See
 ### As a CLI (npm)
 
 ```bash
-npx @immorterm/rudder serve            # MCP over stdio (point Claude / any MCP client at it)
-npx @immorterm/rudder serve --ws-port 8787   # also stream frames over WS
-npx @immorterm/rudder serve --ws-port 8787 --mcp   # both
+npx @envoyage/cli serve            # MCP over stdio (point Claude / any MCP client at it)
+npx @envoyage/cli serve --ws-port 8787   # also stream frames over WS
+npx @envoyage/cli serve --ws-port 8787 --mcp   # both
 ```
 
 ### As a Rust crate
 
 ```rust
-use rudder::BrowserSession;
+use envoyage::BrowserSession;
 
 let rt = tokio::runtime::Builder::new_current_thread().build()?;
 let mut b = BrowserSession::launch(&rt, "https://example.com")?;
@@ -50,7 +50,7 @@ let png_base64 = b.screenshot()?;                 // CSS-pixel-accurate PNG
 The protocol types a consumer renders:
 
 ```rust
-use rudder::{Frame, Cursor, CursorAction, Narration, HumanRequest, Input};
+use envoyage::{Frame, Cursor, CursorAction, Narration, HumanRequest, Input};
 ```
 
 ## The tool surface
@@ -75,14 +75,14 @@ ImmorTerm's set, so a model that knows one knows both.
 | `browser_request_human` / `browser_wait_for_human` | Hand off + wait. |
 | `browser_gif` | Record a session and export an annotated animated GIF. Parity with claude-in-chrome's `gif_creator`. |
 | `browser_close` | Kill the exact spawned browser process. |
-| `browser_eval` | **Gated** raw JS — only with `RUDDER_BROWSER_EVAL=1`. |
+| `browser_eval` | **Gated** raw JS — only with `ENVOYAGE_BROWSER_EVAL=1`. |
 
 Page content (listings, tabs, console, network) is framed as **untrusted** —
 data, not instructions.
 
 ### Human handoff (passwords never reach the model)
 
-When rudder detects a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in screen, or
+When envoyage detects a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in screen, or
 a password/one-time-code field — or the agent calls `browser_request_human` —
 it **pauses**, sends a `browser_human_request` to the WS UI, and returns
 **text only** to the model (no screenshot). While paused the WS still streams
@@ -97,21 +97,21 @@ one already knows this. Flow:
 2. Drive the browser with the other `browser_*` tools.
 3. `browser_gif { action: "stop_recording" }` — stops buffering, keeps frames.
 4. `browser_gif { action: "export", filename?, options? }` — composites overlays,
-   writes the GIF to `${RUDDER_HOME:-~/.rudder}/gif/<filename>`, and returns the
+   writes the GIF to `${ENVOYAGE_HOME:-~/.envoyage}/gif/<filename>`, and returns the
    path. The consumer serves or downloads that file.
 5. `browser_gif { action: "clear" }` — drops the buffer.
 
 `options` (export only) mirror `gif_creator`: `showClickIndicators`,
 `showActionLabels`, `showProgressBar`, `showDragPaths`, `showWatermark`,
 `watermarkText`, `quality` (1–30, lower = better). All bool overlays default
-**true** except — rudder is **vendor-neutral** — `showWatermark` (default
+**true** except — envoyage is **vendor-neutral** — `showWatermark` (default
 **false**) and `showDragPaths` (not yet implemented). There is **no baked-in
 logo**: a watermark renders only your own `watermarkText`. The buffer is capped
 (~600 frames); a truncation is logged, never silent.
 
 ## The WS protocol
 
-On `--ws-port`, rudder serves JSON events to every connected client and accepts
+On `--ws-port`, envoyage serves JSON events to every connected client and accepts
 input back. Envelope `type` tags and field names:
 
 | Direction | `type` | Payload |
@@ -131,14 +131,14 @@ view to page space before sending clicks.
 
 ## Consumers
 
-Embedding rudder in a TypeScript product — spawn it as an MCP server for your
+Embedding envoyage in a TypeScript product — spawn it as an MCP server for your
 agent, stream its frames into your UI, and glide *your* mascot to the agent's
 cursor:
 
-- **[Consuming Rudder](docs/consumers/README.md)** — the two surfaces (MCP
+- **[Consuming Envoyage](docs/consumers/README.md)** — the two surfaces (MCP
   stdio + WS live view), the mascot-neutral protocol, the tool table, and the
   page↔display coordinate mapping.
-- **[Rudder in ringtail](docs/consumers/ringtail.md)** — a ringtail-specific
+- **[Envoyage in ringtail](docs/consumers/ringtail.md)** — a ringtail-specific
   walkthrough: MCP SDK + Vercel AI SDK (Gemini) wiring, rendering frames in the
   cockpit, gliding **Rocco**, and the human-handoff UX.
 - **[`examples/ringtail-consumer/`](examples/ringtail-consumer/)** — a small
@@ -149,13 +149,13 @@ cursor:
 
 | Env | Default | Purpose |
 |-----|---------|---------|
-| `RUDDER_HOME` | `~/.rudder` | Base dir for `browser.lock` + the persistent browser profile. |
-| `RUDDER_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
-| `RUDDER_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
-| `RUDDER_GITHUB_REPO` | `ImmorTerm/rudder` | Release source for the npm wrapper. |
+| `ENVOYAGE_HOME` | `~/.envoyage` | Base dir for `browser.lock` + the persistent browser profile. |
+| `ENVOYAGE_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
+| `ENVOYAGE_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
+| `ENVOYAGE_GITHUB_REPO` | `Envoyage-Browsing/envoyage` | Release source for the npm wrapper. |
 
 Only one real browser drives the shared profile at a time — a cross-process
-lock (`$RUDDER_HOME/browser.lock`) makes the first `serve` the owner; a later
+lock (`$ENVOYAGE_HOME/browser.lock`) makes the first `serve` the owner; a later
 one that finds a live owner refuses rather than corrupting the profile.
 
 ## Status / not-yet

@@ -1,9 +1,9 @@
 //! Cross-process ownership lock for the self-driven browser.
 //!
-//! A consumer may run one `rudder serve` per agent session; each can want the
+//! A consumer may run one `envoyage serve` per agent session; each can want the
 //! browser. Only ONE real browser may drive the shared `--user-data-dir` profile
 //! at a time, or the profile dir's own lock and cookies fight. This file is the
-//! guard: the first process to need the browser writes `$RUDDER_HOME/browser.lock`
+//! guard: the first process to need the browser writes `$ENVOYAGE_HOME/browser.lock`
 //! and becomes the owner; a later process that finds a *live* lock does not
 //! launch a competing browser.
 //!
@@ -41,17 +41,17 @@ pub struct BrowserLock {
     pub created_at: u64,
 }
 
-/// The rudder home dir: `$RUDDER_HOME` if set, else `~/.rudder`.
-pub fn rudder_home() -> PathBuf {
-    if let Some(h) = std::env::var("RUDDER_HOME").ok().filter(|s| !s.is_empty()) {
+/// The envoyage home dir: `$ENVOYAGE_HOME` if set, else `~/.envoyage`.
+pub fn envoyage_home() -> PathBuf {
+    if let Some(h) = std::env::var("ENVOYAGE_HOME").ok().filter(|s| !s.is_empty()) {
         return PathBuf::from(h);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".rudder")
+    PathBuf::from(home).join(".envoyage")
 }
 
 fn lock_path() -> PathBuf {
-    rudder_home().join("browser.lock")
+    envoyage_home().join("browser.lock")
 }
 
 /// The decision the route-vs-own algorithm reaches for the current process.
@@ -227,12 +227,12 @@ mod tests {
 
     #[test]
     fn lock_round_trips_through_disk() {
-        // Isolate the lock into a temp RUDDER_HOME so we never touch the
-        // real ~/.rudder/browser.lock.
-        let dir = std::env::temp_dir().join(format!("rudder-lock-{}", std::process::id()));
+        // Isolate the lock into a temp ENVOYAGE_HOME so we never touch the
+        // real ~/.envoyage/browser.lock.
+        let dir = std::env::temp_dir().join(format!("envoyage-lock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: single-threaded test.
-        unsafe { std::env::set_var("RUDDER_HOME", &dir) };
+        unsafe { std::env::set_var("ENVOYAGE_HOME", &dir) };
 
         let me = std::process::id();
         let nonce = acquire(me, 4321, me + 1).expect("acquire");
@@ -248,7 +248,7 @@ mod tests {
 
         release();
         assert!(read().is_none());
-        unsafe { std::env::remove_var("RUDDER_HOME") };
+        unsafe { std::env::remove_var("ENVOYAGE_HOME") };
         std::fs::remove_dir_all(&dir).ok();
     }
 }

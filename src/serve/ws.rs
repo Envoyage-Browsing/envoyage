@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// Bind `127.0.0.1:port` and serve the frame stream until the process exits.
 pub async fn run(port: u16) -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    eprintln!("rudder: WS frame stream on ws://127.0.0.1:{port}");
+    eprintln!("envoyage: WS frame stream on ws://127.0.0.1:{port}");
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(s) => s,

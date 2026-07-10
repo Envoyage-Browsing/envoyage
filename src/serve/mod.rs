@@ -1,4 +1,4 @@
-//! `rudder serve` — the runnable surface: an MCP stdio server + an optional WS
+//! `envoyage serve` — the runnable surface: an MCP stdio server + an optional WS
 //! frame stream, both driving one in-process browser.
 //!
 //! Layout:
@@ -16,14 +16,14 @@ mod recorder;
 mod state;
 mod ws;
 
-/// How `rudder serve` was invoked.
+/// How `envoyage serve` was invoked.
 pub struct Options {
     /// Serve MCP over stdio (default true when no other transport is given).
     pub mcp: bool,
     /// If set, also serve the WS frame stream on `127.0.0.1:<port>`.
     pub ws_port: Option<u16>,
     /// If set, also serve MCP over Streamable HTTP on `<host>:<port>` (remote
-    /// agents). Bearer auth via `RUDDER_AUTH_TOKEN` when that env var is set.
+    /// agents). Bearer auth via `ENVOYAGE_AUTH_TOKEN` when that env var is set.
     pub http_port: Option<u16>,
     /// If set, drive a REMOTE browser over this CDP WebSocket URL instead of
     /// spawning a local Chromium (e.g. Cloudflare Browser Run).
@@ -41,31 +41,31 @@ pub fn run(opts: Options) -> std::io::Result<()> {
     if let Some(port) = opts.ws_port {
         pump::ensure_pump();
         std::thread::Builder::new()
-            .name("rudder-ws".into())
+            .name("envoyage-ws".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .expect("build ws runtime");
                 if let Err(e) = rt.block_on(ws::run(port)) {
-                    eprintln!("rudder: WS server error: {e}");
+                    eprintln!("envoyage: WS server error: {e}");
                 }
             })?;
     }
 
     // MCP-over-HTTP server on its own runtime + thread, if requested. Bearer
-    // auth is on iff RUDDER_AUTH_TOKEN is set (remote = untrusted network).
+    // auth is on iff ENVOYAGE_AUTH_TOKEN is set (remote = untrusted network).
     if let Some(port) = opts.http_port {
-        let auth_token = std::env::var("RUDDER_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
+        let auth_token = std::env::var("ENVOYAGE_AUTH_TOKEN").ok().filter(|t| !t.is_empty());
         std::thread::Builder::new()
-            .name("rudder-http".into())
+            .name("envoyage-http".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .expect("build http runtime");
                 if let Err(e) = rt.block_on(http::run(port, auth_token)) {
-                    eprintln!("rudder: HTTP server error: {e}");
+                    eprintln!("envoyage: HTTP server error: {e}");
                 }
             })?;
     }

@@ -44,17 +44,17 @@ const CDP_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Locate a Chromium-engine browser binary. Order:
-/// `RUDDER_BROWSER_BIN` env override, Chrome, Chromium, Brave, Edge —
+/// `ENVOYAGE_BROWSER_BIN` env override, Chrome, Chromium, Brave, Edge —
 /// checking macOS app-bundle paths then `$PATH`.
 pub fn find_browser() -> Result<String, String> {
-    if let Ok(bin) = std::env::var("RUDDER_BROWSER_BIN")
+    if let Ok(bin) = std::env::var("ENVOYAGE_BROWSER_BIN")
         && !bin.is_empty()
     {
         if std::path::Path::new(&bin).exists() {
             return Ok(bin);
         }
         return Err(format!(
-            "RUDDER_BROWSER_BIN points at '{bin}' but that path does not exist"
+            "ENVOYAGE_BROWSER_BIN points at '{bin}' but that path does not exist"
         ));
     }
 
@@ -92,7 +92,7 @@ pub fn find_browser() -> Result<String, String> {
     }
 
     Err("No Chromium-engine browser found. Install Chrome, Chromium, Brave, or \
-         Edge, or set RUDDER_BROWSER_BIN to a browser binary path."
+         Edge, or set ENVOYAGE_BROWSER_BIN to a browser binary path."
         .to_string())
 }
 
@@ -178,7 +178,7 @@ pub struct AxNode {
 /// merely connected to (WS transport, no process to own).
 pub struct BrowserSession {
     /// Exact PID we spawned — the ONLY process we ever kill. `None` for a remote
-    /// (WS) connection: rudder did not spawn it and must never kill it.
+    /// (WS) connection: envoyage did not spawn it and must never kill it.
     pid: Option<u32>,
     /// The CDP transport: local pipe or remote WebSocket.
     transport: CdpTransport,
@@ -968,7 +968,7 @@ impl BrowserSession {
     /// (leader == our exact pid via `process_group(0)`) for a graceful shutdown,
     /// then SIGKILL after a short grace period if still alive, then reap.
     ///
-    /// For a REMOTE (WS) connection there is no process we own: rudder must
+    /// For a REMOTE (WS) connection there is no process we own: envoyage must
     /// never kill a browser it did not spawn. We just stop the screencast (a
     /// best-effort CDP call) and drop the transport (which closes the socket).
     pub fn close(&mut self) {
@@ -1146,9 +1146,9 @@ fn dup2_or_err(from: RawFd, to: RawFd) -> std::io::Result<()> {
 }
 
 /// The browser profile directory — persistent so logins survive restarts.
-/// Lives under `$RUDDER_HOME` (default `~/.rudder`), alongside `browser.lock`.
+/// Lives under `$ENVOYAGE_HOME` (default `~/.envoyage`), alongside `browser.lock`.
 fn dirs_profile() -> String {
-    crate::browser_lock::rudder_home()
+    crate::browser_lock::envoyage_home()
         .join("browser-profile")
         .to_string_lossy()
         .into_owned()
@@ -1483,10 +1483,10 @@ mod tests {
     fn env_override_wins_when_path_exists() {
         let exe = std::env::current_exe().unwrap();
         // SAFETY: single-threaded test; no other thread reads the env here.
-        unsafe { std::env::set_var("RUDDER_BROWSER_BIN", &exe) };
+        unsafe { std::env::set_var("ENVOYAGE_BROWSER_BIN", &exe) };
         let found = find_browser().unwrap();
         assert_eq!(found, exe.to_string_lossy());
-        unsafe { std::env::remove_var("RUDDER_BROWSER_BIN") };
+        unsafe { std::env::remove_var("ENVOYAGE_BROWSER_BIN") };
     }
 
     #[test]
@@ -1553,7 +1553,7 @@ mod tests {
     /// a frame arrives, dispatch a click, and close cleanly (exact pid reaped,
     /// no external window since headless). Ignored by default — needs a
     /// Chromium-engine browser installed. Run with:
-    ///   cargo test -p rudder -- --ignored screencast_live_smoke
+    ///   cargo test -p envoyage -- --ignored screencast_live_smoke
     #[test]
     #[ignore = "needs a real browser; run explicitly"]
     fn screencast_live_smoke() {
@@ -1796,13 +1796,13 @@ mod tests {
 
     /// Real end-to-end smoke test — launches a visible browser briefly against a
     /// LOCAL fixture. Run manually:
-    /// `RUDDER_BROWSER_BIN="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
-    ///  RUDDER_BROWSER_FIXTURE=http://127.0.0.1:PORT/browser-fixture.html \
+    /// `ENVOYAGE_BROWSER_BIN="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+    ///  ENVOYAGE_BROWSER_FIXTURE=http://127.0.0.1:PORT/browser-fixture.html \
     ///  cargo test -p immorterm-daemon --release -- --ignored browser_smoke`
     #[test]
     #[ignore]
     fn browser_smoke() {
-        let fixture = std::env::var("RUDDER_BROWSER_FIXTURE")
+        let fixture = std::env::var("ENVOYAGE_BROWSER_FIXTURE")
             .unwrap_or_else(|_| "https://example.com".to_string());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut b = BrowserSession::launch(&rt, &fixture)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * postinstall — Resolve the correct platform binary for @immorterm/rudder
+ * postinstall — Resolve the correct platform binary for @envoyage/cli
  *
  * npm installs the matching platform package via optionalDependencies + os/cpu
  * fields. This script finds the installed binary and copies it to our bin/ dir.
@@ -11,12 +11,12 @@
 const { existsSync, mkdirSync, copyFileSync, chmodSync } = require("fs");
 const { join, dirname } = require("path");
 
-const BINARY_NAME = process.platform === "win32" ? "rudder.exe" : "rudder";
+const BINARY_NAME = process.platform === "win32" ? "envoyage.exe" : "envoyage";
 
 const PLATFORM_PACKAGES = {
-	"darwin-arm64": "@immorterm/rudder-darwin-arm64",
-	"linux-x64": "@immorterm/rudder-linux-x64",
-	"linux-arm64": "@immorterm/rudder-linux-arm64",
+	"darwin-arm64": "@envoyage/cli-darwin-arm64",
+	"linux-x64": "@envoyage/cli-linux-x64",
+	"linux-arm64": "@envoyage/cli-linux-arm64",
 };
 
 function main() {
@@ -25,7 +25,7 @@ function main() {
 
 	if (!pkg) {
 		console.error(
-			`@immorterm/rudder: Unsupported platform ${platformKey}. ` +
+			`@envoyage/cli: Unsupported platform ${platformKey}. ` +
 			`Supported: ${Object.keys(PLATFORM_PACKAGES).join(", ")}`
 		);
 		process.exit(0); // Don't fail npm install
@@ -39,14 +39,14 @@ function main() {
 	} catch {
 		// Platform package not installed (npm may have skipped it)
 		console.error(
-			`@immorterm/rudder: Platform package ${pkg} not found. ` +
+			`@envoyage/cli: Platform package ${pkg} not found. ` +
 			`Install manually: npm install ${pkg}`
 		);
 		process.exit(0);
 	}
 
 	if (!existsSync(sourcePath)) {
-		console.error(`@immorterm/rudder: Binary not found at ${sourcePath}`);
+		console.error(`@envoyage/cli: Binary not found at ${sourcePath}`);
 		process.exit(0);
 	}
 

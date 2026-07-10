@@ -1,4 +1,4 @@
-//! Black-box test of the `rudder serve --mcp` JSON-RPC surface.
+//! Black-box test of the `envoyage serve --mcp` JSON-RPC surface.
 //!
 //! Drives the compiled binary over stdin/stdout — no real browser needed, so it
 //! runs in CI. Locks the handshake, the neutral `browser_*` tool names, the
@@ -8,18 +8,18 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Feed `lines` to `rudder serve --mcp` and collect the JSON responses.
+/// Feed `lines` to `envoyage serve --mcp` and collect the JSON responses.
 fn run_mcp(lines: &[&str], eval: bool) -> Vec<serde_json::Value> {
-    let bin = env!("CARGO_BIN_EXE_rudder");
+    let bin = env!("CARGO_BIN_EXE_envoyage");
     let mut cmd = Command::new(bin);
     cmd.args(["serve", "--mcp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if eval {
-        cmd.env("RUDDER_BROWSER_EVAL", "1");
+        cmd.env("ENVOYAGE_BROWSER_EVAL", "1");
     }
-    let mut child = cmd.spawn().expect("spawn rudder");
+    let mut child = cmd.spawn().expect("spawn envoyage");
     {
         let mut stdin = child.stdin.take().unwrap();
         for l in lines {
@@ -47,8 +47,8 @@ fn initialize_and_list_tools() {
     );
     assert_eq!(resps.len(), 2, "one response per request with an id");
 
-    // Handshake identifies the server as rudder.
-    assert_eq!(resps[0]["result"]["serverInfo"]["name"], "rudder");
+    // Handshake identifies the server as envoyage.
+    assert_eq!(resps[0]["result"]["serverInfo"]["name"], "envoyage");
     assert!(resps[0]["result"]["capabilities"]["tools"].is_object());
 
     // Every tool is neutrally named `browser_*` (no `immorterm_` leakage).
@@ -80,7 +80,7 @@ fn eval_tool_appears_only_when_enabled() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"browser_eval"), "eval tool should appear with RUDDER_BROWSER_EVAL=1");
+    assert!(names.contains(&"browser_eval"), "eval tool should appear with ENVOYAGE_BROWSER_EVAL=1");
 }
 
 #[test]

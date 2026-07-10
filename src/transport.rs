@@ -1,6 +1,6 @@
 //! CDP transport abstraction: the same JSON-RPC-over-CDP conversation, over
 //! either a local `--remote-debugging-pipe` (spawned Chromium) or a remote CDP
-//! WebSocket (a browser rudder did NOT spawn — e.g. Cloudflare Browser Run).
+//! WebSocket (a browser envoyage did NOT spawn — e.g. Cloudflare Browser Run).
 //!
 //! Both transports carry the *same* CDP messages. The only difference is
 //! framing:

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
-const SERVER_NAME: &str = "rudder";
+const SERVER_NAME: &str = "envoyage";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ─── JSON-RPC 2.0 types ─────────────────────────────────────────────
@@ -53,7 +53,7 @@ struct JsonRpcError {
 
 /// Whether the gated `browser_eval` tool is available (off by default).
 fn browser_eval_enabled() -> bool {
-    std::env::var("RUDDER_BROWSER_EVAL").as_deref() == Ok("1")
+    std::env::var("ENVOYAGE_BROWSER_EVAL").as_deref() == Ok("1")
 }
 
 // ─── Run the stdio loop ─────────────────────────────────────────────
@@ -430,7 +430,7 @@ fn handle_tabs_switch(args: &Value) -> Result<String, String> {
 
 fn handle_eval(args: &Value) -> Result<String, String> {
     if !browser_eval_enabled() {
-        return Err("browser_eval is disabled. Set RUDDER_BROWSER_EVAL=1 to enable it.".to_string());
+        return Err("browser_eval is disabled. Set ENVOYAGE_BROWSER_EVAL=1 to enable it.".to_string());
     }
     let js = args.get("js").and_then(|s| s.as_str()).ok_or("'js' is required")?.to_string();
     with_browser(None, |b| b.eval(&js))
