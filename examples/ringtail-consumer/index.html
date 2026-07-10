@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rudder consumer — live view + Rocco</title>
+    <style>
+      body { margin: 0; background: #14110f; color: #eee; font: 14px system-ui, sans-serif; }
+      header { padding: 8px 12px; background: #1e1a17; }
+      #stage { position: relative; width: 1280px; max-width: 100%; }
+      canvas { display: block; width: 100%; background: #000; }
+
+      /* ── The mascot. rudder draws NOTHING; THIS is the consumer's skin. ──
+         ringtail: replace this element (and #balloon) with the real <Rocco> sprite.
+         The `left`/`top` transition is what makes it *glide* to the cursor point. */
+      #rocco {
+        position: absolute; left: 0; top: 0; width: 36px; height: 36px;
+        margin: -36px 0 0 -18px;         /* tip points at the target */
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, #ffb26b, #e8663b);
+        border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.5);
+        transition: left 260ms ease-out, top 260ms ease-out;
+        pointer-events: none;
+      }
+      #rocco.click { transform: scale(1.3); }   /* pose per browser_cursor.action */
+      #rocco.type  { transform: scale(0.85); }
+
+      #balloon {
+        position: absolute; transform: translate(-50%, -140%);
+        background: #fff; color: #222; padding: 4px 8px; border-radius: 8px;
+        font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+        transition: left 260ms ease-out, top 260ms ease-out; pointer-events: none;
+      }
+      #banner {
+        position: absolute; inset: 0 0 auto 0; padding: 10px 12px;
+        background: #b4531e; color: #fff; display: none;
+      }
+      #banner button { margin-left: 10px; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <header>
+      rudder live view — the orange dot is a placeholder <b>Rocco</b>.
+      Run <code>npx tsx driver.ts</code> in this folder, then reload.
+    </header>
+    <div id="stage">
+      <canvas id="view" width="1280" height="800"></canvas>
+      <div id="rocco"></div>
+      <div id="balloon" class="hidden"></div>
+      <div id="banner">
+        <span id="banner-text"></span>
+        <button id="continue">▶ Continue</button>
+      </div>
+    </div>
+    <script type="module" src="./viewer.ts"></script>
+  </body>
+</html>

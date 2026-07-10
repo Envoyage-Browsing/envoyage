@@ -107,6 +107,22 @@ input back. Envelope `type` tags and field names:
 Coordinates are **page CSS pixels**. The consumer un-letterboxes its rendered
 view to page space before sending clicks.
 
+## Consumers
+
+Embedding rudder in a TypeScript product — spawn it as an MCP server for your
+agent, stream its frames into your UI, and glide *your* mascot to the agent's
+cursor:
+
+- **[Consuming Rudder](docs/consumers/README.md)** — the two surfaces (MCP
+  stdio + WS live view), the mascot-neutral protocol, the tool table, and the
+  page↔display coordinate mapping.
+- **[Rudder in ringtail](docs/consumers/ringtail.md)** — a ringtail-specific
+  walkthrough: MCP SDK + Vercel AI SDK (Gemini) wiring, rendering frames in the
+  cockpit, gliding **Rocco**, and the human-handoff UX.
+- **[`examples/ringtail-consumer/`](examples/ringtail-consumer/)** — a small
+  runnable example: a `driver.ts` that drives the browser over MCP and a
+  `viewer.ts` that renders frames + a placeholder Rocco cursor.
+
 ## Configuration
 
 | Env | Default | Purpose |
