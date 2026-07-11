@@ -33,6 +33,15 @@ where
 {
     let (mut sink, mut incoming) = ws.split();
     let mut rx = state::subscribe();
+    // Catch a mid-session joiner up to the CURRENT state: the last painted frame,
+    // narration, pause state, and any active handoff banner. Otherwise a client
+    // connecting while the page is static (e.g. a login screen during a handoff)
+    // would see a blank live-view until the page next changes.
+    for env in state::replay_envelopes() {
+        if sink.send(Message::Text(env)).await.is_err() {
+            return;
+        }
+    }
     loop {
         tokio::select! {
             // Pump -> client: forward each broadcast envelope.

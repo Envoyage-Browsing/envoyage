@@ -74,14 +74,53 @@ fn channels() -> &'static Channels {
     })
 }
 
+/// The last envelope of each replay-worthy type, so a WS client that connects
+/// mid-session sees the CURRENT state immediately instead of a blank frame that
+/// only fills once the page next changes. Without this, a late joiner on a
+/// STATIC page (e.g. a login screen during a human handoff) sees nothing —
+/// `Page.screencastFrame` only fires on visual change. Keyed by envelope `type`:
+/// `browser_frame` (the last painted frame), `browser_narration`,
+/// `browser_human_request`, and `browser_state` (so the handoff banner + pause
+/// state re-appear for anyone joining during a handoff).
+static REPLAY: OnceLock<Mutex<std::collections::HashMap<&'static str, WsEnvelope>>> = OnceLock::new();
+
+fn replay() -> &'static Mutex<std::collections::HashMap<&'static str, WsEnvelope>> {
+    REPLAY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The envelope types we cache + replay to a fresh subscriber (in this order).
+const REPLAY_TYPES: [&str; 4] =
+    ["browser_frame", "browser_narration", "browser_state", "browser_human_request"];
+
 /// Broadcast one envelope to all WS clients (best-effort; no clients = no-op).
+/// Caches replay-worthy envelopes so a late joiner can be caught up on subscribe.
 pub fn broadcast_envelope(env: WsEnvelope) {
+    if let Some(kind) = REPLAY_TYPES.iter().find(|k| env.contains(&format!("\"type\":\"{k}\""))) {
+        if let Ok(mut map) = replay().lock() {
+            // A resume (browser_state paused:false) clears a stale handoff banner
+            // so a fresh client doesn't get banner-ed after the human finished.
+            if *kind == "browser_state" && env.contains("\"paused\":false") {
+                map.remove("browser_human_request");
+            }
+            map.insert(kind, env.clone());
+        }
+    }
     let _ = channels().tx.send(env);
 }
 
 /// Subscribe a new WS client to the envelope stream.
 pub fn subscribe() -> broadcast::Receiver<WsEnvelope> {
     channels().tx.subscribe()
+}
+
+/// The cached envelopes to replay to a client that just connected, in a sane
+/// order (frame first so the picture paints, then narration/state/handoff).
+pub fn replay_envelopes() -> Vec<WsEnvelope> {
+    let map = match replay().lock() {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    REPLAY_TYPES.iter().filter_map(|k| map.get(*k).cloned()).collect()
 }
 
 /// A WS client sends one human input event toward the pump.
@@ -129,5 +168,33 @@ pub fn record_frame(png_base64: &str) {
 pub fn record_overlay(cursor: Option<(f64, f64)>, label: Option<String>) {
     if let Ok(mut rec) = recording().lock() {
         rec.set_pending_overlay(cursor, label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The replay cache lets a late WS joiner see the current frame + any active
+    // handoff banner instead of a blank view on a static page. Serialized under
+    // one test since REPLAY is a process-global.
+    #[test]
+    fn replay_caches_last_frame_and_resume_clears_banner() {
+        // A frame + a handoff both broadcast → both replay, frame first.
+        broadcast_envelope(r#"{"type":"browser_frame","seq":9,"png_base64":"AA"}"#.into());
+        broadcast_envelope(r#"{"type":"browser_human_request","reason":"login"}"#.into());
+        broadcast_envelope(r#"{"type":"browser_state","paused":true}"#.into());
+        let r = replay_envelopes();
+        assert!(r[0].contains("\"type\":\"browser_frame\""), "frame replays first");
+        assert!(r.iter().any(|e| e.contains("browser_human_request")), "handoff banner replays");
+
+        // A resume (paused:false) must clear the stale banner so a fresh client
+        // doesn't get banner-ed after the human finished.
+        broadcast_envelope(r#"{"type":"browser_state","paused":false}"#.into());
+        let r2 = replay_envelopes();
+        assert!(
+            !r2.iter().any(|e| e.contains("browser_human_request")),
+            "resume clears the cached handoff banner"
+        );
     }
 }
