@@ -37,10 +37,6 @@ use std::time::{Duration, Instant};
 /// Default window geometry (CSS pixels).
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 800;
-/// Retina render scale: the page renders at 2× the CSS viewport and the
-/// screencast captures the full 2× surface, so the panel's downscaled frame is
-/// crisp on HiDPI. Frame px = CSS px * this factor.
-const DEVICE_SCALE_FACTOR: u32 = 2;
 /// Per-CDP-command timeout. Navigation has its own longer load wait on top.
 const CDP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `navigate` waits for `Page.loadEventFired` before giving up (SPA
@@ -1040,15 +1036,13 @@ impl BrowserSession {
             return Ok(());
         }
         let (w, h) = self.viewport.unwrap_or((WINDOW_WIDTH, WINDOW_HEIGHT));
-        // Capture the full retina surface (CSS px × DSF) so the panel downscales
-        // a 2× frame for crisp HiDPI rendering.
         self.cdp(
             "Page.startScreencast",
             json!({
                 "format": "jpeg",
                 "quality": 75,
-                "maxWidth": w * DEVICE_SCALE_FACTOR,
-                "maxHeight": h * DEVICE_SCALE_FACTOR,
+                "maxWidth": w,
+                "maxHeight": h,
                 "everyNthFrame": 1,
             }),
         )?;
@@ -1067,16 +1061,14 @@ impl BrowserSession {
         if self.viewport == Some((w, h)) {
             return Ok(());
         }
-        // Pin the layout viewport to the panel's CSS size; render at 2× (retina)
-        // so the screencast surface is crisp. The click-map stays in CSS px (the
-        // panel maps its box→natural, and natural is the 2× frame — the ratio is
-        // consistent, so clicks still land right). mobile:false = desktop.
+        // Pin the layout viewport to the panel's size. deviceScaleFactor 1 keeps
+        // frame px == CSS px (the click-map assumes 1:1). mobile:false = desktop.
         self.cdp(
             "Emulation.setDeviceMetricsOverride",
             json!({
                 "width": w,
                 "height": h,
-                "deviceScaleFactor": DEVICE_SCALE_FACTOR,
+                "deviceScaleFactor": 1,
                 "mobile": false,
             }),
         )?;
