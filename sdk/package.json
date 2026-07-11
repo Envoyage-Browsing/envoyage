@@ -1,6 +1,6 @@
 {
   "name": "@envoyage/browser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin, Workers-safe client for the Envoyage browser-driving engine. fetch + SSE only in the core path; drive a real remote browser (CF Browser Run or any Chrome), watch it live, and hand off to a human.",
   "type": "module",
   "main": "./dist/index.js",
