@@ -3,8 +3,8 @@
 // The engine (`envoyage serve --http-port N`) is the single source of driving,
 // detection, and tab-following. This SDK marshals to it: NO NAPI, NO WASM, NO
 // port of the driving logic. The core path uses ONLY `fetch` (POST /mcp for
-// driving, POST /input for human input) and an SSE reader over a streamed fetch
-// Response (GET /events for frames/cursor/narration/handoff/state). No
+// driving, POST /sessions/:id/input for human input) and an SSE reader over a
+// streamed fetch Response (GET /sessions/:id/events for the live view). No
 // WebSocket, no node built-ins here — this module bundles into a Cloudflare
 // Worker unchanged. (The Node-only `launch()` helper lives in ./launch.)
 //
@@ -32,12 +32,16 @@ import { readSse } from "./sse.js";
 export * from "./types.js";
 export { classifyHandoff, parseHumanNeeded, HUMAN_NEEDED_JS, AX_SNAPSHOT_JS } from "./detection.js";
 
-/** Routes on the engine. `/mcp` exists today; `/events` + `/input` are the live-view HTTP surface. */
-const ROUTES = {
-  mcp: "/mcp",
-  events: "/events",
-  input: "/input",
-} as const;
+/**
+ * Routes on the engine. `/mcp` is flat — the browser is picked by the
+ * `Mcp-Session-Id` header. The live-view routes are per-session PATHS
+ * (`/sessions/:id/events`, `/sessions/:id/input`) keyed by the SAME session id,
+ * so the SSE bus + input queue line up with the driven browser (and a mid-session
+ * join gets that session's keyframe-on-connect). See engine src/serve/http.rs.
+ */
+const MCP_ROUTE = "/mcp";
+const sessionEventsRoute = (id: string) => `/sessions/${encodeURIComponent(id)}/events`;
+const sessionInputRoute = (id: string) => `/sessions/${encodeURIComponent(id)}/input`;
 
 let jsonRpcId = 0;
 
@@ -73,10 +77,15 @@ export class BrowserSession {
     this.token = opts.token;
     this.cdpUrl = opts.cdpUrl;
     this.sessionId = opts.sessionId ?? randomId();
-    this.fetchImpl = opts.fetch ?? globalThis.fetch;
-    if (typeof this.fetchImpl !== "function") {
+    const rawFetch = opts.fetch ?? globalThis.fetch;
+    if (typeof rawFetch !== "function") {
       throw new Error("createSession: no `fetch` available — pass one in options");
     }
+    // Bind to globalThis: the browser's `fetch` is a Window method and throws
+    // "Illegal invocation" if called with any other `this` (which is what happens
+    // when we invoke it as `this.fetchImpl(...)`). A caller-supplied fetch is used
+    // as-is (it may already be bound / a test double).
+    this.fetchImpl = opts.fetch ?? rawFetch.bind(globalThis);
   }
 
   // ─── Driving (POST /mcp, JSON-RPC tools/call) ─────────────────────────────
@@ -234,7 +243,7 @@ export class BrowserSession {
   async *events(): AsyncGenerator<LiveEvent> {
     const abort = this.openStream();
     try {
-      const res = await this.fetchImpl(this.url(ROUTES.events), {
+      const res = await this.fetchImpl(this.url(sessionEventsRoute(this.sessionId)), {
         method: "GET",
         headers: this.headers({ accept: "text/event-stream" }),
         signal: abort.signal,
@@ -265,7 +274,7 @@ export class BrowserSession {
    * CSS pixels (un-letterbox the live view first).
    */
   async sendInput(event: InputEvent): Promise<void> {
-    const res = await this.fetchImpl(this.url(ROUTES.input), {
+    const res = await this.fetchImpl(this.url(sessionInputRoute(this.sessionId)), {
       method: "POST",
       headers: this.headers({ "content-type": "application/json" }),
       body: JSON.stringify(event),
@@ -356,7 +365,7 @@ export class BrowserSession {
       method: "tools/call",
       params: { name, arguments: pruneUndefined(args) },
     };
-    const res = await this.fetchImpl(this.url(ROUTES.mcp), {
+    const res = await this.fetchImpl(this.url(MCP_ROUTE), {
       method: "POST",
       headers: this.headers({ "content-type": "application/json", accept: "application/json" }),
       body: JSON.stringify(body),

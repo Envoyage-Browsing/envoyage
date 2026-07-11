@@ -30,8 +30,9 @@ use crate::protocol::Input;
 use crate::serve::{mcp, state};
 use axum::{
     Router,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{Next, from_fn},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -63,7 +64,12 @@ pub async fn run(port: u16, auth_token: Option<String>) -> std::io::Result<()> {
         )
         .route("/sessions/{id}/events", get(sse_events_handler))
         .route("/sessions/{id}/input", post(input_handler))
-        .with_state(state);
+        .with_state(state)
+        // CORS: this surface is meant to be called by a browser/Worker over fetch
+        // (the @envoyage/browser SDK), so it MUST answer cross-origin preflights and
+        // reflect the caller's Origin. Applied last so it wraps every route + the
+        // preflight before it hits routing.
+        .layer(from_fn(cors));
 
     // Default to loopback; opt into 0.0.0.0 for a hosted deployment.
     let host = std::env::var("ENVOYAGE_HTTP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -292,6 +298,49 @@ async fn input_handler(
     }
 }
 
+/// Permissive CORS for the browser/Worker SDK. Reflects the request `Origin` (so a
+/// bearer-authed cross-origin fetch is allowed) and short-circuits the OPTIONS
+/// preflight with the allowed methods + headers. No credentials mode: this surface
+/// authenticates with a bearer token, never cookies, so reflecting any origin is
+/// safe — the token, not the origin, is the gate.
+async fn cors(req: Request, next: Next) -> Response {
+    // Echo the caller's Origin, or fall back to `*` for a no-Origin request.
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("*"));
+
+    let is_preflight = req.method() == axum::http::Method::OPTIONS;
+    let mut resp = if is_preflight {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    h.insert(header::VARY, HeaderValue::from_static("Origin"));
+    if is_preflight {
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+        // The SDK sends content-type + the MCP session/CDP routing headers + bearer.
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static(
+                "content-type, accept, authorization, mcp-session-id, x-envoyage-cdp-url",
+            ),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("86400"),
+        );
+    }
+    resp
+}
+
 async fn method_not_allowed() -> impl IntoResponse {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -371,5 +420,64 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<Input>(r#"{"kind":"bogus"}"#).is_err());
+    }
+
+    // The browser SDK can't reach this surface at all without CORS: an OPTIONS
+    // preflight must 204 with the allowed methods/headers, and every response must
+    // reflect the caller's Origin. If this regresses, the live view silently shows
+    // "paddling out" forever (the fetch is blocked before it leaves the browser).
+    #[tokio::test]
+    async fn cors_preflight_and_origin_reflection() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt; // oneshot
+
+        let app = Router::new()
+            .route("/mcp", post(|| async { "ok" }))
+            .layer(from_fn(cors));
+
+        // Preflight → 204 with the allow-* headers and the reflected origin.
+        let pre = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5747")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pre.status(), StatusCode::NO_CONTENT);
+        let ph = pre.headers();
+        assert_eq!(ph.get("access-control-allow-origin").unwrap(), "http://localhost:5747");
+        assert!(ph.get("access-control-allow-methods").is_some());
+        assert!(
+            ph.get("access-control-allow-headers")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("mcp-session-id"),
+            "the SDK's session header must be allowed",
+        );
+
+        // Actual POST → the origin is reflected on the real response too.
+        let post_resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5747")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post_resp.status(), StatusCode::OK);
+        assert_eq!(
+            post_resp.headers().get("access-control-allow-origin").unwrap(),
+            "http://localhost:5747",
+        );
     }
 }

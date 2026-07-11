@@ -136,7 +136,7 @@ test("driving marshals a JSON-RPC tools/call with session header + bearer", asyn
   assert.deepEqual(body.params.arguments, { url: "https://example.com" });
 });
 
-test("sendInput POSTs the input envelope to /input", async () => {
+test("sendInput POSTs the input envelope to the per-session /sessions/:id/input", async () => {
   let captured: { url: string; body: string } | null = null;
   const fakeFetch = (async (url: string, init: RequestInit) => {
     captured = { url, body: init.body as string };
@@ -146,10 +146,59 @@ test("sendInput POSTs the input envelope to /input", async () => {
   const s = createSession({
     endpoint: "https://engine.example.com",
     cdpUrl: "wss://cf/cdp",
+    sessionId: "sess-x",
     fetch: fakeFetch,
   });
   await s.sendInput({ kind: "click", x: 12, y: 34 });
   const cap = captured as unknown as { url: string; body: string };
-  assert.equal(cap.url, "https://engine.example.com/input");
+  // The path must be keyed by the session id (NOT a flat /input) so the input
+  // reaches the same session's pump the SSE bus + driven browser belong to.
+  assert.equal(cap.url, "https://engine.example.com/sessions/sess-x/input");
   assert.deepEqual(JSON.parse(cap.body), { kind: "click", x: 12, y: 34 });
+});
+
+test("the default fetch is bound to globalThis (no 'Illegal invocation' in browsers)", async () => {
+  // The browser's `fetch` is a Window method; calling it as `this.fetchImpl(...)`
+  // with the SDK instance as `this` throws "Illegal invocation". The SDK must bind
+  // the default fetch to globalThis. We assert that by making a global fetch that
+  // records its `this` and confirming it's globalThis, not the BrowserSession.
+  let seenThis: unknown = "unset";
+  const orig = globalThis.fetch;
+  globalThis.fetch = function (this: unknown) {
+    seenThis = this;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  } as unknown as typeof fetch;
+  try {
+    const s = createSession({
+      endpoint: "https://engine.example.com",
+      cdpUrl: "wss://cf/cdp",
+      sessionId: "sess-bind",
+    });
+    await s.sendInput({ kind: "key", key: "Enter" });
+    assert.equal(seenThis, globalThis, "default fetch must be invoked with globalThis as `this`");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("the SSE live view subscribes to the per-session /sessions/:id/events", async () => {
+  let capturedUrl = "";
+  const fakeFetch = (async (url: string) => {
+    capturedUrl = url;
+    // Empty but valid SSE stream so events() completes without hanging.
+    return new Response(new ReadableStream({ start: (c) => c.close() }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }) as unknown as typeof fetch;
+
+  const s = createSession({
+    endpoint: "https://engine.example.com",
+    cdpUrl: "wss://cf/cdp",
+    sessionId: "sess-y",
+    fetch: fakeFetch,
+  });
+  // Drain the iterator so the GET fires.
+  for await (const _ of s.events()) { /* no events */ }
+  assert.equal(capturedUrl, "https://engine.example.com/sessions/sess-y/events");
 });

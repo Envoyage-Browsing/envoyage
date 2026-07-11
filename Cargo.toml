@@ -28,3 +28,8 @@ futures-util = "0.3"
 axum = "0.8"
 image = { version = "0.25.10", default-features = false, features = ["png", "gif"] }
 imageproc = { version = "0.27.0", default-features = false }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` for the CORS middleware test (tower is already pulled in
+# transitively by axum, so this adds no new crate to the build graph).
+tower = { version = "0.5", features = ["util"] }
