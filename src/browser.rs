@@ -201,6 +201,10 @@ pub struct BrowserSession {
     /// Whether `Page.startScreencast` is currently running on the pinned target.
     /// Screencast is per-target: re-armed after every `attach_target` switch.
     screencast_on: bool,
+    /// Panel-driven viewport (CSS px). `None` → default WINDOW_WIDTH/HEIGHT.
+    /// Set by `set_viewport` so the page renders at the panel's aspect ratio
+    /// (no letterbox); screencast maxWidth/maxHeight follow it.
+    viewport: Option<(u32, u32)>,
     /// Screencast frames (base64 JPEG/PNG) captured out of the CDP event stream
     /// during other command round-trips, waiting for the pump to drain them.
     /// Only the newest is worth sending, but we keep the last `sessionId` to ack.
@@ -313,6 +317,7 @@ impl BrowserSession {
             refs: HashMap::new(),
             ref_counter: 0,
             screencast_on: false,
+            viewport: None,
             pending_screencast: Vec::new(),
             console: Vec::new(),
             network: Vec::new(),
@@ -352,6 +357,7 @@ impl BrowserSession {
             refs: HashMap::new(),
             ref_counter: 0,
             screencast_on: false,
+            viewport: None,
             pending_screencast: Vec::new(),
             console: Vec::new(),
             network: Vec::new(),
@@ -690,12 +696,13 @@ impl BrowserSession {
     }
 
     pub fn scroll(&mut self, dy: f64) -> Result<(), String> {
+        let (vw, vh) = self.viewport.unwrap_or((WINDOW_WIDTH, WINDOW_HEIGHT));
         self.cdp(
             "Input.dispatchMouseEvent",
             json!({
                 "type": "mouseWheel",
-                "x": (WINDOW_WIDTH / 2) as f64,
-                "y": (WINDOW_HEIGHT / 2) as f64,
+                "x": (vw / 2) as f64,
+                "y": (vh / 2) as f64,
                 "deltaX": 0.0,
                 "deltaY": dy,
             }),
@@ -1019,25 +1026,59 @@ impl BrowserSession {
     // ── Screencast (live mirror into the workshop panel) ─────────────
 
     /// Arm `Page.startScreencast` on the current page target if not already on.
-    /// PNG (not JPEG): the webview panel hardcodes a `data:image/png` URI, so a
-    /// JPEG payload would carry the wrong MIME. Scale 1 keeps frame px == CSS px
-    /// so the panel's letterbox→CSS-px click mapping stays 1:1 (matching the
-    /// Retina screenshot clip). Idempotent per target.
+    /// JPEG (quality 75): ~10x faster to encode and ~5x smaller than PNG, so
+    /// the pipe sustains real 30-60fps. The webview panel sniffs the base64
+    /// magic bytes for the MIME, so JPEG frames render correctly. maxWidth/
+    /// maxHeight track the panel viewport (see `set_viewport`) so page px ==
+    /// frame px and clicks map 1:1 with no letterbox. Idempotent per target.
     pub fn ensure_screencast(&mut self) -> Result<(), String> {
         if self.screencast_on {
             return Ok(());
         }
+        let (w, h) = self.viewport.unwrap_or((WINDOW_WIDTH, WINDOW_HEIGHT));
         self.cdp(
             "Page.startScreencast",
             json!({
-                "format": "png",
-                "maxWidth": WINDOW_WIDTH,
-                "maxHeight": WINDOW_HEIGHT,
+                "format": "jpeg",
+                "quality": 75,
+                "maxWidth": w,
+                "maxHeight": h,
                 "everyNthFrame": 1,
             }),
         )?;
         self.screencast_on = true;
         Ok(())
+    }
+
+    /// Set the page viewport to the panel's actual pixel size (CSS px) so the
+    /// page renders at the panel's aspect ratio — no letterbox in the panel.
+    /// Re-arms the screencast so maxWidth/maxHeight track the new size. Called
+    /// from the MCP pump when the webview reports a panel open/resize. A no-op
+    /// if the size is unchanged. Bounds are clamped to sane CDP limits.
+    pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let w = width.clamp(200, 8192);
+        let h = height.clamp(200, 8192);
+        if self.viewport == Some((w, h)) {
+            return Ok(());
+        }
+        // Pin the layout viewport to the panel's size. deviceScaleFactor 1 keeps
+        // frame px == CSS px (the click-map assumes 1:1). mobile:false = desktop.
+        self.cdp(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": w,
+                "height": h,
+                "deviceScaleFactor": 1,
+                "mobile": false,
+            }),
+        )?;
+        self.viewport = Some((w, h));
+        // Re-arm the screencast so maxWidth/maxHeight adopt the new bounds.
+        if self.screencast_on {
+            let _ = self.cdp("Page.stopScreencast", json!({}));
+            self.screencast_on = false;
+        }
+        self.ensure_screencast()
     }
 
     /// Stop the screencast (on close / before teardown). Best-effort.
