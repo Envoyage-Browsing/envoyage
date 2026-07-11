@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-11
+
+First `@envoyage/cli` release published tokenlessly via npm Trusted Publishing (OIDC). Carries the serve/security work below.
+
 ### Added
 - **Multi-session remote serve surface** (`envoyage serve --http-port N`): one
   process multiplexes N independent browsers, keyed by the client's

@@ -1,6 +1,6 @@
 [package]
 name = "envoyage"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Drive a real headless browser from any AI agent, live — with a mascot-neutral cursor/narration protocol."
 license = "MIT OR Apache-2.0"
