@@ -39,7 +39,9 @@ jobs:
 
       - name: Install SDK deps
         working-directory: sdk
-        run: npm ci
+        # package-lock.json is gitignored, so `npm ci` can't run — plain install
+        # of the two build-time devDeps (typescript, @types/node) is enough.
+        run: npm install --no-audit --no-fund
 
       - name: Guard — tag matches package.json version
         if: startsWith(github.ref, 'refs/tags/sdk-v')
