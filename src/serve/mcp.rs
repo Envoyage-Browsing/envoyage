@@ -385,10 +385,23 @@ fn settle() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
+/// Belt-and-suspenders: while a session is paused (human driving / handoff),
+/// strip EVERY node value from the AX listing before it reaches the model. The
+/// screenshot is already suppressed while paused; this closes the parallel
+/// AX-value leak (a secret typed into a non-`password` field during a handoff).
+fn strip_values_if_paused(session_id: &str, nodes: &mut [(String, browser::AxNode)]) {
+    if crate::serve::state::is_paused(session_id) {
+        for (_, n) in nodes.iter_mut() {
+            n.value = None;
+        }
+    }
+}
+
 fn handle_read_page(session_id: &str, args: &Value) -> Result<String, String> {
     let interactive_only = args.get("interactive_only").and_then(|v| v.as_bool()).unwrap_or(true);
     with_browser(session_id, None, |b| {
-        let (title, url, nodes) = b.snapshot(interactive_only)?;
+        let (title, url, mut nodes) = b.snapshot(interactive_only)?;
+        strip_values_if_paused(session_id, &mut nodes);
         Ok(browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
@@ -400,6 +413,7 @@ fn handle_find(session_id: &str, args: &Value) -> Result<String, String> {
         const FIND_CAP: usize = 20;
         let extra = nodes.len().saturating_sub(FIND_CAP);
         nodes.truncate(FIND_CAP);
+        strip_values_if_paused(session_id, &mut nodes);
         let mut out = browser::render_ax_listing(&title, &url, &nodes, false);
         if extra > 0 {
             out.push_str(&format!("\n({extra} more — refine your query to narrow it.)"));

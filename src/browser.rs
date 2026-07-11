@@ -715,6 +715,12 @@ impl BrowserSession {
     /// each element's role, accessible name, value, and CSS-pixel box — this is
     /// transport-cheap (one Runtime.evaluate) and needs no CDP AX domain.
     pub fn snapshot(&mut self, interactive_only: bool) -> Result<(String, String, Vec<(String, AxNode)>), String> {
+        // Inject the masking config the shared IIFE reads off window. Built from
+        // env; the selector is JSON-encoded (serde) so a hostile value can't
+        // break out of the string / inject JS. Password floor applies even if
+        // this is `{}`.
+        let cfg = ax_mask_config_js();
+        let _ = self.eval_raw(&format!("window.__ENVOYAGE_AX_MASK={cfg}; true"));
         let js = AX_SNAPSHOT_JS;
         let raw = self.eval_raw(js)?;
         let s = raw.as_str().unwrap_or("{}");
@@ -1322,6 +1328,35 @@ pub fn render_ax_listing(
     s
 }
 
+/// Build the `window.__ENVOYAGE_AX_MASK` object literal from env vars, ready to
+/// prepend to the snapshot eval. `ENVOYAGE_MASK_ALL_INPUTS` truthy ("1"/"true")
+/// → `maskAllInputs:true`; `ENVOYAGE_MASK_SELECTOR` → `maskSelector:"<sel>"`,
+/// JSON-encoded so it can't inject JS. Returns `{}` when neither is set (the
+/// password floor in the shared JS still applies).
+fn ax_mask_config_js() -> String {
+    ax_mask_config_from(
+        std::env::var("ENVOYAGE_MASK_ALL_INPUTS").ok().as_deref(),
+        std::env::var("ENVOYAGE_MASK_SELECTOR").ok().as_deref(),
+    )
+}
+
+/// Pure core of `ax_mask_config_js`, split out for unit testing.
+fn ax_mask_config_from(mask_all: Option<&str>, selector: Option<&str>) -> String {
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = mask_all {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "1" || v == "true" {
+            obj.insert("maskAllInputs".into(), json!(true));
+        }
+    }
+    if let Some(sel) = selector
+        && !sel.trim().is_empty()
+    {
+        obj.insert("maskSelector".into(), json!(sel));
+    }
+    Value::Object(obj).to_string()
+}
+
 /// Base64-decode helper kept local so tests can assert screenshot bytes.
 pub fn decode_png_len(b64: &str) -> usize {
     base64::engine::general_purpose::STANDARD
@@ -1651,6 +1686,95 @@ mod tests {
         assert!(AX_SNAPSHOT_JS.contains("getBoundingClientRect"));
         assert!(AX_SNAPSHOT_JS.contains("JSON.stringify"));
         assert!(AX_SNAPSHOT_JS.trim_end().ends_with("})()"));
+    }
+
+    /// The shared snapshot JS carries the always-on password floor and the three
+    /// configurable masking hooks. Cheap static guard so a refactor of the IIFE
+    /// can't silently drop the security floor without a matching test failure.
+    #[test]
+    fn ax_snapshot_js_has_masking_logic() {
+        assert!(AX_SNAPSHOT_JS.contains("__ENVOYAGE_AX_MASK"));
+        assert!(AX_SNAPSHOT_JS.contains("password")); // floor
+        assert!(AX_SNAPSHOT_JS.contains("maskAllInputs"));
+        assert!(AX_SNAPSHOT_JS.contains("maskSelector"));
+        assert!(AX_SNAPSHOT_JS.contains("data-envoyage-mask"));
+    }
+
+    /// The injected `window.__ENVOYAGE_AX_MASK` literal is built from env with a
+    /// JSON-encoded selector — a hostile selector can't break out of the string.
+    #[test]
+    fn ax_mask_config_encodes_safely() {
+        // Neither env set → `{}` (password floor still applies in the JS).
+        assert_eq!(ax_mask_config_from(None, None), "{}");
+        // maskAllInputs truthy variants.
+        assert_eq!(ax_mask_config_from(Some("1"), None), r#"{"maskAllInputs":true}"#);
+        assert_eq!(ax_mask_config_from(Some("TRUE"), None), r#"{"maskAllInputs":true}"#);
+        // Falsey / junk → omitted.
+        assert_eq!(ax_mask_config_from(Some("0"), None), "{}");
+        assert_eq!(ax_mask_config_from(Some("nope"), None), "{}");
+        // Selector is JSON-encoded: quotes/backslashes escaped, no raw injection.
+        let out = ax_mask_config_from(None, Some(r#"a"];alert(1)//"#));
+        assert!(out.contains("maskSelector"));
+        assert!(!out.contains("alert(1)//\"];")); // not a raw break-out
+        // It round-trips as JSON (i.e. it's a valid, escaped literal).
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["maskSelector"], json!(r#"a"];alert(1)//"#));
+        // Empty selector → omitted.
+        assert_eq!(ax_mask_config_from(None, Some("   ")), "{}");
+    }
+
+    /// A `password`-masked node (value=None from the JS floor) NEVER renders a
+    /// `value:"…"` in the untrusted listing the model sees. This is the core
+    /// security invariant: a typed password can't reach the model via the AX path.
+    #[test]
+    fn render_ax_listing_never_emits_masked_password_value() {
+        // Represents what the shared JS produces for <input type=password>: the
+        // typed value is dropped (None) before it ever reaches Rust.
+        let nodes = vec![(
+            "ref_1".to_string(),
+            AxNode {
+                role: "textbox".into(),
+                name: "Password".into(),
+                value: None, // masked by the floor in ax-snapshot.js
+                cx: 1.0,
+                cy: 1.0,
+                interactive: true,
+                dom_idx: 0,
+            },
+        )];
+        let out = render_ax_listing("t", "u", &nodes, true);
+        assert!(!out.contains("value:"));
+        assert!(!out.to_lowercase().contains("hunter2"));
+        // The field itself is still listed (name/role/ref) so the model can act.
+        assert!(out.contains("ref_1"));
+        assert!(out.contains("Password"));
+    }
+
+    /// While paused, the server-side strip nulls EVERY value (belt-and-suspenders
+    /// for secrets typed into non-password fields during a handoff). Mirror of
+    /// `strip_values_if_paused`, testing the render invariant it guarantees.
+    #[test]
+    fn render_ax_listing_omits_values_when_all_stripped() {
+        let mut nodes = vec![(
+            "ref_1".to_string(),
+            AxNode {
+                role: "textbox".into(),
+                name: "Card".into(),
+                value: Some("4111111111111111".into()),
+                cx: 1.0,
+                cy: 1.0,
+                interactive: true,
+                dom_idx: 0,
+            },
+        )];
+        // Simulate the paused strip.
+        for (_, n) in nodes.iter_mut() {
+            n.value = None;
+        }
+        let out = render_ax_listing("t", "u", &nodes, false);
+        assert!(!out.contains("4111"));
+        assert!(!out.contains("value:"));
+        assert!(out.contains("ref_1")); // element still enumerated
     }
 
     /// Frame round-trip against a mock pipe: prove NUL-splitting, partial-chunk

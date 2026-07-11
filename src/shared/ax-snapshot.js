@@ -6,6 +6,23 @@
 // heuristics can never diverge. Keep it dependency-free browser JS: one
 // self-contained IIFE returning a JSON string, no imports, no framework.
 (() => {
+  // PostHog-session-replay-style masking config, injected by the engine (or set
+  // by an SDK caller) on window.__ENVOYAGE_AX_MASK. Safe default {} — the
+  // password floor below applies regardless.
+  const CFG = (typeof window !== 'undefined' && window.__ENVOYAGE_AX_MASK) || {};
+  // True when this element's typed value must never be emitted. Floor: every
+  // <input type="password"> is always masked. Then the configurable modes.
+  const MASKED = (el) => {
+    const t = el.tagName;
+    if (t === 'INPUT' && (el.type || '').toLowerCase() === 'password') return true;
+    if (t !== 'INPUT' && t !== 'TEXTAREA' && t !== 'SELECT') return false;
+    if (CFG.maskAllInputs === true) return true;
+    if (typeof CFG.maskSelector === 'string' && CFG.maskSelector) {
+      try { if (el.closest(CFG.maskSelector)) return true; } catch (_e) { /* bad selector: ignore */ }
+    }
+    try { if (el.closest('[data-envoyage-mask]')) return true; } catch (_e) { /* ignore */ }
+    return false;
+  };
   const ROLE = (el) => {
     const r = el.getAttribute('role');
     if (r) return r;
@@ -50,15 +67,19 @@
     // and re-measure it after reflows.
     el.setAttribute('data-immorterm-ref', String(idx));
     let value = undefined;
-    if (role === 'checkbox' || role === 'radio') value = el.checked ? 'checked' : 'unchecked';
+    const masked = MASKED(el);
+    if (masked) value = undefined;
+    else if (role === 'checkbox' || role === 'radio') value = el.checked ? 'checked' : 'unchecked';
     else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') value = String(el.value || '');
     else if (el.tagName === 'SELECT') value = String(el.value || '');
-    items.push({
+    const item = {
       role, name: NAME(el, role, idx), value, idx,
       interactive: INTERACTIVE.has(role),
       cx: Math.round(rect.x + rect.width / 2),
       cy: Math.round(rect.y + rect.height / 2),
-    });
+    };
+    if (masked) item.masked = true;
+    items.push(item);
     idx++;
   }
   return JSON.stringify({ title: document.title, url: location.href, items });

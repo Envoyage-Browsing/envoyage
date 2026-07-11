@@ -236,6 +236,24 @@ fn evaluate(expr: &str, s: &MockScript) -> Value {
         let payload = json!({ "kind": s.handoff_kind }).to_string();
         return json!({ "result": { "value": payload } });
     }
+    // AX snapshot (shared/ax-snapshot.js): return a canned listing with one text
+    // input carrying a value, so tests can assert the paused value-strip. The
+    // password floor is exercised at the JS layer (sdk test) + render layer
+    // (browser.rs unit test); here we prove the server-side paused suppression.
+    // NOTE: must precede the title/url branch — the snapshot JS also references
+    // document.title + location.href, so it would otherwise match that first.
+    if expr.contains("getBoundingClientRect") && expr.contains("data-immorterm-ref") {
+        let payload = json!({
+            "title": s.title,
+            "url": s.url,
+            "items": [{
+                "role": "textbox", "name": "Card number", "value": "4111111111111111",
+                "idx": 0, "interactive": true, "cx": 5, "cy": 5,
+            }],
+        })
+        .to_string();
+        return json!({ "result": { "value": payload } });
+    }
     // current_title_url: `JSON.stringify({t:document.title,u:location.href})`.
     if expr.contains("document.title") && expr.contains("location.href") {
         let payload = json!({ "t": s.title, "u": s.url }).to_string();
@@ -245,7 +263,8 @@ fn evaluate(expr: &str, s: &MockScript) -> Value {
     if expr.contains("devicePixelRatio") {
         return json!({ "result": { "value": 1.0 } });
     }
-    // Anything else → null value (harmless for the paths we drive).
+    // Anything else → null value (harmless for the paths we drive) — includes the
+    // `window.__ENVOYAGE_AX_MASK=…` config assignment the engine prepends.
     json!({ "result": { "value": Value::Null } })
 }
 
@@ -454,6 +473,42 @@ fn no_screenshot_bytes_while_wall_is_up() {
         mock.script.lock().unwrap().screenshot_called,
         "captureScreenshot runs once the wall is down"
     );
+}
+
+/// While the wall is up (session paused / handoff), `read_page` and `find` must
+/// strip EVERY input value from the AX listing before returning to the model —
+/// the parallel of the screenshot suppression. The mock returns an AX listing
+/// with a card number typed into a text field; with the wall up that value must
+/// NOT appear. This catches secrets typed into non-`password` fields during a
+/// handoff.
+#[test]
+fn no_input_values_in_ax_listing_while_wall_is_up() {
+    let mock = MockCdp::start(MockScript::page(
+        "t1", "Checkout", "https://shop.test/pay", "password",
+    ));
+    let mut engine = Engine::spawn_mcp(&mock.url);
+
+    // Drive into the wall → paused.
+    let _ = engine.tool("browser_open", json!({ "url": "https://shop.test/pay" }));
+
+    // read_page while paused: field is still listed, its value is withheld.
+    let read = engine.tool("browser_read_page", json!({ "interactive_only": false }));
+    let read_txt = text_of(&read);
+    assert!(read_txt.contains("Card number"), "the field is still enumerated");
+    assert!(!read_txt.contains("4111"), "the typed value must be stripped while paused");
+    assert!(!read_txt.contains("value:"), "no value: field at all while paused");
+
+    // find while paused: same guarantee.
+    let found = engine.tool("browser_find", json!({ "query": "card" }));
+    let found_txt = text_of(&found);
+    assert!(!found_txt.contains("4111"), "find must also strip values while paused");
+
+    // Wall down (close resets pause): the value flows again (guard is state-driven).
+    mock.script.lock().unwrap().handoff_kind.clear();
+    let _ = engine.tool("browser_close", json!({}));
+    let _ = engine.tool("browser_open", json!({ "url": "https://shop.test/pay" }));
+    let read2 = engine.tool("browser_read_page", json!({ "interactive_only": false }));
+    assert!(text_of(&read2).contains("4111"), "with the wall down, values return");
 }
 
 /// [4] Multi-session isolation: two agents pointed at the SAME engine over the
