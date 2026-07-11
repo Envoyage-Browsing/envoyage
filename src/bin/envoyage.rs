@@ -79,9 +79,13 @@ OPTIONS:
                         --ws-port/--http-port is given.
     --ws-port <PORT>    Also stream frames + accept input over WS on
                         127.0.0.1:<PORT>. Pass with --mcp to serve both.
-    --http-port <PORT>  Also serve MCP over Streamable HTTP (POST /mcp) for a
-                        remote agent. Bind host via ENVOYAGE_HTTP_HOST (default
-                        127.0.0.1). Bearer auth via ENVOYAGE_AUTH_TOKEN.
+    --http-port <PORT>  Also serve the remote surface for a remote agent + the
+                        SDK: MCP over Streamable HTTP (POST /mcp, session-routed
+                        via the Mcp-Session-Id header), a per-session live-view
+                        SSE stream (GET /sessions/<id>/events), and an input
+                        channel (POST /sessions/<id>/input). Bind host via
+                        ENVOYAGE_HTTP_HOST (default 127.0.0.1). Bearer auth via
+                        ENVOYAGE_AUTH_TOKEN.
     --cdp-url <URL>     Drive a REMOTE browser at this CDP WebSocket URL
                         (ws://…/wss://…) instead of spawning a local Chromium —
                         e.g. a Cloudflare Browser Run endpoint.

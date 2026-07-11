@@ -1,25 +1,47 @@
-//! MCP Streamable HTTP transport (`envoyage serve --http-port N`).
+//! The remote surface (`envoyage serve --http-port N`): MCP over Streamable
+//! HTTP **plus** a per-session live-view SSE stream and input channel. This is
+//! the Workers-safe brain the SDK talks to — plain fetch + Server-Sent Events,
+//! no WebSocket anywhere on this surface.
 //!
-//! Mirrors the shape immorterm-memory uses: a single POST endpoint that parses
-//! one JSON-RPC 2.0 request, dispatches it through the SAME [`mcp::handle_request`]
-//! the stdio transport uses (same tools, same browser), and replies with either
-//! plain JSON or an SSE `event: message` frame depending on the client's Accept
-//! header. GET/DELETE are 405 — this is a request/response transport, no long-
-//! lived server→client SSE stream (envoyage's live view is the WS frame stream,
-//! not the MCP channel).
+//! Routes (all bearer-gated when `ENVOYAGE_AUTH_TOKEN` is set):
+//! - `POST /mcp` — one JSON-RPC 2.0 MCP request, dispatched through the SAME
+//!   [`mcp::handle_request`] the stdio transport uses (same tools, same
+//!   registry). Session routing via the `Mcp-Session-Id` header (standard MCP).
+//!   Replies plain JSON or an SSE `event: message` frame per the Accept header.
+//! - `GET /sessions/:id/events` — the live view: a `text/event-stream` that
+//!   pushes this session's Frame + Cursor + Narration + HumanRequest + State
+//!   envelopes as SSE `data:` events (frames ride as base64 PNG inside the
+//!   frame envelope). Replays the current frame + handoff banner on connect,
+//!   then streams. Auto-reconnects (native EventSource), Workers-native.
+//! - `POST /sessions/:id/input` — the human's clicks/keys/scroll + pause/resume
+//!   control during a handoff, as one [`protocol::Input`] JSON body. Plain
+//!   fetch; feeds the session's pump exactly like the WS input path.
+//!
+//! PASSWORD-BLIND boundary: enforced in Rust, NOT here in wire code. While a
+//! session is paused/handed-off, its MCP tool responses already carry no
+//! screenshot/AX bytes (see `mcp::handle_browser_shot`). The SSE stream IS the
+//! human's live view and DOES carry frames during a handoff — that is the only
+//! path to the screen, and only the human watching the stream sees it.
 //!
 //! Remote = untrusted network, so a bearer token (`ENVOYAGE_AUTH_TOKEN`) gates
 //! every request when set. Unset → no auth (local dev).
 
-use crate::serve::mcp;
+use crate::protocol::Input;
+use crate::serve::{mcp, state};
 use axum::{
     Router,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::post,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::{get, post},
 };
+use futures_util::stream::{self, StreamExt};
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Shared HTTP state: the optional bearer token required on every request.
 struct HttpState {
@@ -39,6 +61,8 @@ pub async fn run(port: u16, auth_token: Option<String>) -> std::io::Result<()> {
                 .get(method_not_allowed)
                 .delete(method_not_allowed),
         )
+        .route("/sessions/{id}/events", get(sse_events_handler))
+        .route("/sessions/{id}/input", post(input_handler))
         .with_state(state);
 
     // Default to loopback; opt into 0.0.0.0 for a hosted deployment.
@@ -149,6 +173,96 @@ async fn mcp_http_handler(
     }
 }
 
+/// `GET /sessions/:id/events` — the per-session live-view SSE stream.
+///
+/// On connect we replay the session's cached envelopes (current frame + any
+/// active handoff banner + pause state) so a viewer joining a STATIC page sees
+/// the picture immediately, then forward every new envelope as it's broadcast.
+/// Each SSE event names its protocol type (`event: browser_frame` etc.) with the
+/// full JSON envelope as `data:` — the SDK dispatches on the event name and the
+/// frame's base64 PNG rides inside the `browser_frame` envelope.
+async fn sse_events_handler(
+    State(state): State<Arc<HttpState>>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+
+    // Replay-first, then live: chain the cached envelopes ahead of the broadcast
+    // receiver so a mid-session joiner is caught up before the next frame.
+    let replay = state::replay_envelopes_of(&session_id);
+    let rx = state::subscribe_to(&session_id);
+
+    let replay_stream = stream::iter(replay.into_iter().map(sse_event));
+    let live_stream = stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(env) => return Some((sse_event(env), rx)),
+                // Slow client: skip missed frames (coalescing), keep streaming.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return None, // bus dropped → end stream
+            }
+        }
+    });
+
+    let events = replay_stream.chain(live_stream);
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+/// Turn a broadcast envelope (`{"type":"browser_frame",...}`) into an SSE event
+/// named by its `type` so the client can dispatch on the event name. Falls back
+/// to an unnamed `message` event if the type can't be read.
+fn sse_event(env: String) -> Result<Event, Infallible> {
+    let name = envelope_type(&env).unwrap_or("message");
+    Ok(Event::default().event(name).data(env))
+}
+
+/// Extract the `"type":"..."` discriminant from a serialized envelope without a
+/// full parse (the envelopes are small, flat, and we control their shape).
+fn envelope_type(env: &str) -> Option<&'static str> {
+    const TYPES: [&str; 5] = [
+        "browser_frame",
+        "browser_cursor",
+        "browser_narration",
+        "browser_human_request",
+        "browser_state",
+    ];
+    TYPES
+        .into_iter()
+        .find(|t| env.contains(&format!("\"type\":\"{t}\"")))
+}
+
+/// `POST /sessions/:id/input` — the human's live-view input during a handoff
+/// (click/key/scroll) or a pause/resume control toggle. Body is one
+/// [`protocol::Input`] JSON object (same wire shape the WS surface accepts); we
+/// queue it onto the session's input channel for its pump to dispatch.
+async fn input_handler(
+    State(state): State<Arc<HttpState>>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    match serde_json::from_str::<Input>(&body) {
+        Ok(ev) => {
+            state::push_input_to(&session_id, ev);
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            [("content-type", "application/json")],
+            format!(r#"{{"error":"invalid input event: {e}"}}"#),
+        )
+            .into_response(),
+    }
+}
+
 async fn method_not_allowed() -> impl IntoResponse {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -191,5 +305,42 @@ mod tests {
             let resp = resp.unwrap_or_else(|| panic!("expected 401 for {bad:?}"));
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    // The SSE event name is derived from the envelope's `type` so the client can
+    // dispatch by event name. Every protocol envelope must map to its own name;
+    // an unknown/garbage envelope falls back to the generic `message` event.
+    #[test]
+    fn envelope_type_names_each_protocol_event() {
+        for t in [
+            "browser_frame",
+            "browser_cursor",
+            "browser_narration",
+            "browser_human_request",
+            "browser_state",
+        ] {
+            let env = format!(r#"{{"type":"{t}","x":1}}"#);
+            assert_eq!(envelope_type(&env), Some(t), "{t} should name itself");
+        }
+        assert_eq!(envelope_type(r#"{"nope":true}"#), None, "unknown → fallback");
+    }
+
+    // The input body must deserialize from the exact protocol wire shape the WS
+    // surface accepts (the SDK's POST /input body). If this contract drifts, the
+    // human's live-view clicks/keys/controls silently 400.
+    #[test]
+    fn input_body_parses_all_wire_kinds() {
+        for body in [
+            r#"{"kind":"click","x":10,"y":20}"#,
+            r#"{"kind":"key","key":"Enter"}"#,
+            r#"{"kind":"scroll","dy":-5}"#,
+            r#"{"kind":"control","action":"pause"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Input>(body).is_ok(),
+                "POST /input must accept {body}"
+            );
+        }
+        assert!(serde_json::from_str::<Input>(r#"{"kind":"bogus"}"#).is_err());
     }
 }
