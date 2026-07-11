@@ -6,7 +6,7 @@
 //! Claude natively — already knows how to drive it, and the ref-based output is
 //! byte-for-byte the same shape.
 
-use super::pump::{ensure_pump, with_browser};
+use super::pump::{ensure_pump, ensure_pump_for, with_browser};
 use super::recorder::ExportOptions;
 use super::state;
 use crate::browser;
@@ -203,17 +203,17 @@ fn error_content(base: JsonRpcResponse, e: &str) -> JsonRpcResponse {
 const PAUSED_SCREEN_PLACEHOLDER: &str =
     "🔒 Screen hidden — a human is driving the browser (paused). Call browser_wait_for_human.";
 
-fn emit_cursor(x: f64, y: f64, action: CursorAction) {
+fn emit_cursor(session_id: &str, x: f64, y: f64, action: CursorAction) {
     let c = Cursor { x, y, action };
     if let Ok(env) = serde_json::to_string(&c.to_envelope()) {
-        state::broadcast_envelope(env);
+        state::broadcast_envelope_to(session_id, env);
     }
 }
 
-fn emit_narration(text: &str) {
+fn emit_narration(session_id: &str, text: &str) {
     let n = Narration { text: truncate_narration(text) };
     if let Ok(env) = serde_json::to_string(&n.to_envelope()) {
-        state::broadcast_envelope(env);
+        state::broadcast_envelope_to(session_id, env);
     }
 }
 
@@ -234,11 +234,11 @@ fn hand_off_to_human(session_id: &str, reason: &str, instructions: Option<&str>)
     state::set_paused(session_id, true);
     let h = HumanRequest { reason: reason.to_string(), instructions: instructions.map(String::from) };
     if let Ok(env) = serde_json::to_string(&h.to_envelope()) {
-        state::broadcast_envelope(env);
+        state::broadcast_envelope_to(session_id, env);
     }
     // Also announce the pause state so a UI toggle stays in sync.
     if let Ok(env) = serde_json::to_string(&State { paused: true }.to_envelope()) {
-        state::broadcast_envelope(env);
+        state::broadcast_envelope_to(session_id, env);
     }
     format!(
         "🙋 Human needed: {reason}. The browser is paused and handed to you in the \
@@ -344,10 +344,10 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
     })?;
 
     if let Some(text) = &narration {
-        emit_narration(text);
+        emit_narration(session_id, text);
     }
     if let Some((x, y, action)) = &cursor {
-        emit_cursor(*x, *y, *action);
+        emit_cursor(session_id, *x, *y, *action);
     }
     // Stamp the GIF recorder's pending overlay so the next captured frame carries
     // this action's click point + label (no-op unless recording).
@@ -359,12 +359,12 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
     // Human-handoff: pause, banner, text-only (no screenshot to the model).
     if let Some(reason) = handoff {
         let msg = hand_off_to_human(session_id, reason.reason(), Some(reason.instructions()));
-        ensure_pump(); // keep the live view flowing for the human
+        ensure_pump_for(session_id); // keep the live view flowing for the human
         return Ok(vec![json!({ "type": "text", "text": msg })]);
     }
 
-    // Start the live screencast pump (idempotent).
-    ensure_pump();
+    // Start this session's live screencast pump (idempotent).
+    ensure_pump_for(session_id);
 
     // Paused (human driving): never return the screen to the model.
     if state::is_paused(session_id) {
@@ -482,7 +482,7 @@ fn handle_wait_for_human(session_id: &str, args: &Value) -> Result<String, Strin
         if !state::is_paused(session_id) {
             // Announce the resume so a UI toggle stays in sync.
             if let Ok(env) = serde_json::to_string(&State { paused: false }.to_envelope()) {
-                state::broadcast_envelope(env);
+                state::broadcast_envelope_to(session_id, env);
             }
             return Ok("✅ Human finished — resuming.".to_string());
         }

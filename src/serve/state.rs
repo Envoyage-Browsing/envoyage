@@ -97,52 +97,69 @@ pub fn set_paused(session_id: &str, v: bool) {
 }
 
 /// A serialized protocol envelope (`{"type":"browser_*", ...}`) broadcast to
-/// every connected WS client. `String` (not the typed event) so a client that
-/// joins late simply misses old frames — coalescing is inherent.
+/// every connected live-view client (WS or SSE) of one session. `String` (not
+/// the typed event) so a client that joins late simply misses old frames —
+/// coalescing is inherent.
 pub type WsEnvelope = String;
 
-/// Lazily-created broadcast bus (pump -> WS clients) and input queue
-/// (WS clients -> pump). Both are process-global so the MCP stdio loop, the
-/// pump thread, and the WS accept loop share one browser.
+/// The envelope types we cache + replay to a fresh subscriber (in this order:
+/// frame first so the picture paints, then narration/state/handoff banner).
+const REPLAY_TYPES: [&str; 4] =
+    ["browser_frame", "browser_narration", "browser_state", "browser_human_request"];
+
+/// One session's live-view bus: the broadcast channel (pump -> viewers), the
+/// human-input queue (viewers -> pump), and the replay cache (last frame +
+/// narration + pause state + handoff banner) so a client that connects
+/// mid-session sees the CURRENT state instead of a blank frame that only fills
+/// on the next visual change. Per session so many sessions multiplex on one
+/// process, each with its own live view + input path.
 struct Channels {
     tx: broadcast::Sender<WsEnvelope>,
     input_tx: mpsc::UnboundedSender<Input>,
     input_rx: Mutex<mpsc::UnboundedReceiver<Input>>,
+    /// Last envelope of each replay-worthy `type`. Without this a late joiner on
+    /// a STATIC page (a login screen during a handoff) would see nothing —
+    /// `Page.screencastFrame` only fires on visual change.
+    replay: Mutex<HashMap<&'static str, WsEnvelope>>,
 }
 
-static CHANNELS: OnceLock<Channels> = OnceLock::new();
-
-fn channels() -> &'static Channels {
-    CHANNELS.get_or_init(|| {
+impl Channels {
+    fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
-        Channels { tx, input_tx, input_rx: Mutex::new(input_rx) }
-    })
+        Channels {
+            tx,
+            input_tx,
+            input_rx: Mutex::new(input_rx),
+            replay: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
-/// The last envelope of each replay-worthy type, so a WS client that connects
-/// mid-session sees the CURRENT state immediately instead of a blank frame that
-/// only fills once the page next changes. Without this, a late joiner on a
-/// STATIC page (e.g. a login screen during a human handoff) sees nothing —
-/// `Page.screencastFrame` only fires on visual change. Keyed by envelope `type`:
-/// `browser_frame` (the last painted frame), `browser_narration`,
-/// `browser_human_request`, and `browser_state` (so the handoff banner + pause
-/// state re-appear for anyone joining during a handoff).
-static REPLAY: OnceLock<Mutex<std::collections::HashMap<&'static str, WsEnvelope>>> = OnceLock::new();
+/// The registry of per-session live-view buses, created lazily on first use
+/// (first frame broadcast or first subscribe). `Arc` so a caller can clone the
+/// bus out and drop the registry lock before doing channel work.
+static CHANNELS: OnceLock<Mutex<HashMap<String, Arc<Channels>>>> = OnceLock::new();
 
-fn replay() -> &'static Mutex<std::collections::HashMap<&'static str, WsEnvelope>> {
-    REPLAY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn channels_registry() -> &'static Mutex<HashMap<String, Arc<Channels>>> {
+    CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The envelope types we cache + replay to a fresh subscriber (in this order).
-const REPLAY_TYPES: [&str; 4] =
-    ["browser_frame", "browser_narration", "browser_state", "browser_human_request"];
+/// Get (or create) `session_id`'s live-view bus.
+fn channels(session_id: &str) -> Arc<Channels> {
+    let mut map = channels_registry().lock().expect("channels registry poisoned");
+    map.entry(session_id.to_string())
+        .or_insert_with(|| Arc::new(Channels::new()))
+        .clone()
+}
 
-/// Broadcast one envelope to all WS clients (best-effort; no clients = no-op).
-/// Caches replay-worthy envelopes so a late joiner can be caught up on subscribe.
-pub fn broadcast_envelope(env: WsEnvelope) {
+/// Broadcast one envelope to all of `session_id`'s viewers (best-effort; no
+/// viewers = no-op). Caches replay-worthy envelopes so a late joiner can be
+/// caught up on subscribe.
+pub fn broadcast_envelope_to(session_id: &str, env: WsEnvelope) {
+    let ch = channels(session_id);
     if let Some(kind) = REPLAY_TYPES.iter().find(|k| env.contains(&format!("\"type\":\"{k}\"")))
-        && let Ok(mut map) = replay().lock()
+        && let Ok(mut map) = ch.replay.lock()
     {
         // A resume (browser_state paused:false) clears a stale handoff banner
         // so a fresh client doesn't get banner-ed after the human finished.
@@ -151,38 +168,53 @@ pub fn broadcast_envelope(env: WsEnvelope) {
         }
         map.insert(kind, env.clone());
     }
-    let _ = channels().tx.send(env);
+    let _ = ch.tx.send(env);
 }
 
-/// Subscribe a new WS client to the envelope stream.
-pub fn subscribe() -> broadcast::Receiver<WsEnvelope> {
-    channels().tx.subscribe()
+/// Subscribe a new viewer to `session_id`'s envelope stream.
+pub fn subscribe_to(session_id: &str) -> broadcast::Receiver<WsEnvelope> {
+    channels(session_id).tx.subscribe()
 }
 
-/// The cached envelopes to replay to a client that just connected, in a sane
-/// order (frame first so the picture paints, then narration/state/handoff).
-pub fn replay_envelopes() -> Vec<WsEnvelope> {
-    let map = match replay().lock() {
+/// The cached envelopes to replay to a viewer that just connected to
+/// `session_id`, in a sane order (frame first, then narration/state/handoff).
+pub fn replay_envelopes_of(session_id: &str) -> Vec<WsEnvelope> {
+    let ch = channels(session_id);
+    let map = match ch.replay.lock() {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
     REPLAY_TYPES.iter().filter_map(|k| map.get(*k).cloned()).collect()
 }
 
-/// A WS client sends one human input event toward the pump.
-pub fn push_input(ev: Input) {
-    let _ = channels().input_tx.send(ev);
+/// A viewer sends one human input event toward `session_id`'s pump.
+pub fn push_input_to(session_id: &str, ev: Input) {
+    let _ = channels(session_id).input_tx.send(ev);
 }
 
-/// Drain all queued human input (called by the pump each tick).
-pub fn drain_input() -> Vec<Input> {
+/// Drain all queued human input for `session_id` (called by the pump each tick).
+pub fn drain_input_of(session_id: &str) -> Vec<Input> {
+    let ch = channels(session_id);
     let mut out = Vec::new();
-    if let Ok(mut rx) = channels().input_rx.lock() {
+    if let Ok(mut rx) = ch.input_rx.lock() {
         while let Ok(ev) = rx.try_recv() {
             out.push(ev);
         }
     }
     out
+}
+
+// Back-compat single-session wrappers: the WS surface streams the DEFAULT_SESSION
+// (the stdio/WS session), so ws.rs subscribes / replays / pushes input against it
+// without threading a session id it doesn't have.
+pub fn subscribe() -> broadcast::Receiver<WsEnvelope> {
+    subscribe_to(DEFAULT_SESSION)
+}
+pub fn replay_envelopes() -> Vec<WsEnvelope> {
+    replay_envelopes_of(DEFAULT_SESSION)
+}
+pub fn push_input(ev: Input) {
+    push_input_to(DEFAULT_SESSION, ev);
 }
 
 // ─── GIF recording buffer ───────────────────────────────────────────
@@ -226,21 +258,36 @@ mod tests {
     // one test since REPLAY is a process-global.
     #[test]
     fn replay_caches_last_frame_and_resume_clears_banner() {
+        // Isolated per-session bus so this doesn't pollute another test's session.
+        let sid = "replay-test";
         // A frame + a handoff both broadcast → both replay, frame first.
-        broadcast_envelope(r#"{"type":"browser_frame","seq":9,"png_base64":"AA"}"#.into());
-        broadcast_envelope(r#"{"type":"browser_human_request","reason":"login"}"#.into());
-        broadcast_envelope(r#"{"type":"browser_state","paused":true}"#.into());
-        let r = replay_envelopes();
+        broadcast_envelope_to(sid, r#"{"type":"browser_frame","seq":9,"png_base64":"AA"}"#.into());
+        broadcast_envelope_to(sid, r#"{"type":"browser_human_request","reason":"login"}"#.into());
+        broadcast_envelope_to(sid, r#"{"type":"browser_state","paused":true}"#.into());
+        let r = replay_envelopes_of(sid);
         assert!(r[0].contains("\"type\":\"browser_frame\""), "frame replays first");
         assert!(r.iter().any(|e| e.contains("browser_human_request")), "handoff banner replays");
 
         // A resume (paused:false) must clear the stale banner so a fresh client
         // doesn't get banner-ed after the human finished.
-        broadcast_envelope(r#"{"type":"browser_state","paused":false}"#.into());
-        let r2 = replay_envelopes();
+        broadcast_envelope_to(sid, r#"{"type":"browser_state","paused":false}"#.into());
+        let r2 = replay_envelopes_of(sid);
         assert!(
             !r2.iter().any(|e| e.contains("browser_human_request")),
             "resume clears the cached handoff banner"
+        );
+    }
+
+    // Per-session isolation: an envelope broadcast to session A must NOT appear
+    // in session B's replay cache — the multiplexing guarantee the SSE surface
+    // relies on so one session's frames never leak into another's live view.
+    #[test]
+    fn buses_are_isolated_per_session() {
+        broadcast_envelope_to("iso-a", r#"{"type":"browser_frame","seq":1,"png_base64":"AA"}"#.into());
+        assert!(replay_envelopes_of("iso-a").iter().any(|e| e.contains("\"seq\":1")));
+        assert!(
+            replay_envelopes_of("iso-b").is_empty(),
+            "session B's bus must not see session A's frame"
         );
     }
 
