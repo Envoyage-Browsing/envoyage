@@ -134,6 +134,14 @@ pub fn ensure_pump() {
 /// and broadcast the newest frame. Holds the browser mutex only briefly.
 fn pump_loop() {
     let mut seq: u64 = 0;
+    // Target ids we've already seen. Each tick we follow any target that appeared
+    // since — a popup/new tab opened WITHOUT a tool call (async OAuth redirect,
+    // "Sign in with Google" popup) — so the live view re-points to the newest
+    // active target instead of streaming a stale opener. `attach_target` (inside
+    // follow_new_target) resets screencast_on, so the ensure_screencast below
+    // re-arms the screencast on the followed target. Switching to an EXISTING tab
+    // (tabs_switch) never looks new, so a manual switch is never yanked back.
+    let mut known: Vec<String> = Vec::new();
     loop {
         std::thread::sleep(PUMP_TICK);
         let inputs = state::drain_input();
@@ -146,6 +154,12 @@ fn pump_loop() {
             for ev in inputs {
                 dispatch_input(b, ev);
             }
+            // Auto-follow a genuinely-new target (popup/new tab) to both drive AND
+            // stream it. Best-effort; refresh the baseline afterward.
+            if !known.is_empty() {
+                b.follow_new_target(&known);
+            }
+            known = b.page_target_ids();
             if b.ensure_screencast().is_err() {
                 continue;
             }

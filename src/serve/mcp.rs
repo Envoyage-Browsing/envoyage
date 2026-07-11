@@ -271,7 +271,11 @@ fn handle_browser_shot(tool: &str, args: &Value) -> Result<Vec<Value>, String> {
             "browser_open" => {
                 let url = args.get("url").and_then(|s| s.as_str()).ok_or("'url' is required")?;
                 narration = Some(format!("Opening {url}"));
+                let before = b.page_target_ids();
                 b.navigate(url)?;
+                // A navigation can open a popup/new tab (e.g. a landing page that
+                // immediately pops an auth window); follow it like click/key do.
+                b.follow_new_target(&before);
             }
             "browser_screenshot" => {}
             "browser_click" => {
