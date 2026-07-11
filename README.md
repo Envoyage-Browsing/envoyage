@@ -1,6 +1,33 @@
-# envoyage
+<p align="center">
+  <img src="./docs/assets/hero-web.png" alt="envoyage — drive a real browser from any AI agent, live" width="100%">
+</p>
 
-**Drive a real browser from any AI agent — live.**
+<p align="center">
+  <strong>Drive a real browser from any AI agent — live.</strong><br>
+  A headless Chromium over a private CDP pipe, a small ref-based tool surface, and a
+  <em>mascot-neutral</em> live screencast — <strong>bring your own mascot</strong>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Envoyage-Browsing/envoyage/actions/workflows/ci.yml"><img src="https://github.com/Envoyage-Browsing/envoyage/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@envoyage/browser"><img src="https://img.shields.io/npm/v/@envoyage/browser?label=%40envoyage%2Fbrowser&color=0B2447&labelColor=2563EB" alt="@envoyage/browser on npm"></a>
+  <a href="https://www.npmjs.com/package/@envoyage/cli"><img src="https://img.shields.io/npm/v/@envoyage/cli?label=%40envoyage%2Fcli&color=0B2447&labelColor=2563EB" alt="@envoyage/cli on npm"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2563EB.svg" alt="License: MIT OR Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/works%20with-Claude%20Code%20·%20any%20MCP%20client-22D3EE?labelColor=0B2447" alt="Works with Claude Code and any MCP client">
+  <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs welcome"></a>
+  <a href="https://github.com/Envoyage-Browsing/envoyage/commits/main"><img src="https://img.shields.io/github/last-commit/Envoyage-Browsing/envoyage?color=2563EB" alt="Last commit"></a>
+</p>
+
+<p align="center">
+  <a href="#quickstart"><b>Quickstart</b></a> ·
+  <a href="#the-tool-surface"><b>Tool surface</b></a> ·
+  <a href="#human-handoff-passwords-never-reach-the-model"><b>Human handoff</b></a> ·
+  <a href="#consumers"><b>Consumers</b></a> ·
+  <a href="#configuration"><b>Configuration</b></a> ·
+  <a href="#releasing"><b>Releasing</b></a>
+</p>
+
+---
 
 envoyage launches a headless Chromium over a private CDP pipe and gives an AI
 agent a small, ref-based tool surface to navigate, read, click, type, scroll,
