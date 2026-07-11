@@ -1,0 +1,34 @@
+meta {
+  name: Session input (handoff)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/sessions/{{sessionId}}/input
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "kind": "click",
+    "x": 120,
+    "y": 48
+  }
+}
+
+docs {
+  One protocol Input event. Other kinds:
+    {"kind":"key","key":"Enter"}
+    {"kind":"scroll","dy":-300}
+    {"kind":"control","action":"pause"}
+}

@@ -1,0 +1,298 @@
+openapi: 3.1.0
+info:
+  title: envoyage serve — remote surface
+  version: 0.1.0
+  description: |
+    The HTTP surface of `envoyage serve --http-port N`: MCP-over-Streamable-HTTP
+    driving plus a per-session live view (SSE) and input channel. Workers-safe —
+    plain `fetch` + Server-Sent Events, no WebSocket on this surface.
+
+    **Source of truth.** This spec documents the ACTUAL routes in
+    `src/serve/http.rs`. Keep it in sync with the Bruno collection at
+    `api-collections/envoyage/` on any serve-API change (see `docs/api/README.md`).
+
+    **Auth.** Every route is bearer-gated when `ENVOYAGE_AUTH_TOKEN` is set; unset
+    → no auth (local dev). There is no `/health` route.
+servers:
+  - url: http://localhost:{port}
+    description: Local `envoyage serve --http-port {port}`
+    variables:
+      port:
+        default: "8788"
+        description: The value passed to `--http-port` (ENVOYAGE_HTTP_PORT).
+
+security:
+  - bearerAuth: []
+
+paths:
+  /mcp:
+    post:
+      operationId: mcpRequest
+      summary: One JSON-RPC 2.0 MCP request (driving)
+      description: |
+        Dispatches a single JSON-RPC 2.0 MCP request through the same tool
+        registry the stdio transport uses (`initialize`, `tools/list`,
+        `tools/call`). Multi-session routing is via the optional
+        `Mcp-Session-Id` header — each distinct id gets its own browser
+        (its own CDP connection); no header → the single default `stdio` session.
+
+        Response is plain JSON, or an SSE `event: message` frame when the client
+        sends `Accept: text/event-stream` (MCP Streamable HTTP negotiation).
+        A notification (no `id`) returns `202 Accepted` with no body.
+
+        The `browser_*` tool surface (from `tools/list`): `browser_open`,
+        `browser_read_page`, `browser_find`, `browser_click`, `browser_form_input`,
+        `browser_key`, `browser_scroll`, `browser_screenshot`, `browser_tabs_list`,
+        `browser_tabs_switch`, `browser_close`, `browser_request_human`,
+        `browser_wait_for_human`, `browser_wait_for`, `browser_console`,
+        `browser_network`, `browser_upload`, `browser_gif`, and the env-gated
+        `browser_eval` (`ENVOYAGE_BROWSER_EVAL=1`).
+      parameters:
+        - $ref: '#/components/parameters/McpSessionId'
+        - name: Accept
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: ["application/json", "text/event-stream"]
+          description: Send `text/event-stream` to get an SSE-framed reply.
+        - name: X-Envoyage-Cdp-Url
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Optional remote CDP WebSocket URL to drive instead of a local spawn
+            (allow-listed CORS header on this surface).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcRequest'
+            examples:
+              initialize:
+                value:
+                  jsonrpc: "2.0"
+                  id: 1
+                  method: "initialize"
+                  params: {}
+              toolsList:
+                value:
+                  jsonrpc: "2.0"
+                  id: 2
+                  method: "tools/list"
+                  params: {}
+              openTab:
+                value:
+                  jsonrpc: "2.0"
+                  id: 3
+                  method: "tools/call"
+                  params:
+                    name: "browser_open"
+                    arguments:
+                      url: "https://example.com"
+      responses:
+        "200":
+          description: |
+            JSON-RPC response (plain JSON) or, with `Accept: text/event-stream`,
+            a single `event: message` SSE frame carrying the JSON-RPC body.
+            JSON-RPC-level errors (parse error, tool panic) also return 200 with
+            an `error` member per the JSON-RPC spec.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcResponse'
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: message
+                  data: {"jsonrpc":"2.0","id":3,"result":{}}
+        "202":
+          description: Accepted — the request was a notification (no `id`); no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "405":
+          description: Method not allowed (GET/DELETE on `/mcp`). POST JSON-RPC instead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /sessions/{id}/events:
+    get:
+      operationId: sessionEvents
+      summary: Per-session live-view SSE stream
+      description: |
+        A `text/event-stream` that replays the session's cached envelopes on
+        connect (current frame first, then narration / state / handoff banner),
+        then forwards every new envelope live. Each SSE event is NAMED by its
+        protocol `type` so the client can dispatch on the event name. Frames ride
+        as base64 PNG inside the `browser_frame` envelope. A 15s keep-alive
+        comment holds the connection open; native `EventSource` auto-reconnects.
+
+        Event names (each `data:` is the full JSON envelope):
+        - `browser_frame` — Frame: `{png_base64, title, url, seq}`
+        - `browser_cursor` — Cursor: `{x, y, action}` (action: move|click|type|scroll)
+        - `browser_narration` — Narration: `{text}`
+        - `browser_human_request` — HumanRequest: `{reason, instructions?}` (handoff banner)
+        - `browser_state` — State: `{paused}`
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        "200":
+          description: An open `text/event-stream` of named protocol events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                frame:
+                  value: |
+                    event: browser_frame
+                    data: {"type":"browser_frame","png_base64":"iVBORw0K...","title":"Example","url":"https://example.com","seq":42}
+                cursor:
+                  value: |
+                    event: browser_cursor
+                    data: {"type":"browser_cursor","x":120.0,"y":48.0,"action":"click"}
+                narration:
+                  value: |
+                    event: browser_narration
+                    data: {"type":"browser_narration","text":"Clicking \"Sign in\""}
+                handoff:
+                  value: |
+                    event: browser_human_request
+                    data: {"type":"browser_human_request","reason":"login","instructions":"solve the sign-in"}
+                state:
+                  value: |
+                    event: browser_state
+                    data: {"type":"browser_state","paused":true}
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /sessions/{id}/input:
+    post:
+      operationId: sessionInput
+      summary: Push one human input event into a session (live-view handoff)
+      description: |
+        The human's live-view click / key / scroll, or a pause/continue control
+        toggle, as one protocol `Input` object. Coordinates are page CSS pixels.
+        Queued onto the session's input channel for its pump to dispatch.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Input'
+            examples:
+              click: { value: { kind: click, x: 120, y: 48 } }
+              key: { value: { kind: key, key: "Enter" } }
+              scroll: { value: { kind: scroll, dy: -300 } }
+              pause: { value: { kind: control, action: "pause" } }
+      responses:
+        "202":
+          description: Accepted — event queued for the session's pump.
+        "400":
+          description: Invalid input event (did not match the `Input` wire shape).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <ENVOYAGE_AUTH_TOKEN>`. Required on every route
+        when `ENVOYAGE_AUTH_TOKEN` is set; unset → auth disabled (local dev).
+
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Session id (matches the `Mcp-Session-Id` used for driving; `stdio` is the default).
+    McpSessionId:
+      name: Mcp-Session-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Picks/creates the browser session. Omit → default `stdio` session.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token (only when `ENVOYAGE_AUTH_TOKEN` is set).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          example:
+            error: "missing or invalid bearer token"
+
+  schemas:
+    JsonRpcRequest:
+      type: object
+      required: [method]
+      properties:
+        jsonrpc:
+          type: string
+          const: "2.0"
+        id:
+          description: Request id. Omit for a notification (→ 202, no response).
+          oneOf:
+            - type: integer
+            - type: string
+            - type: "null"
+        method:
+          type: string
+          enum: [initialize, tools/list, tools/call]
+        params:
+          type: object
+    JsonRpcResponse:
+      type: object
+      required: [jsonrpc]
+      properties:
+        jsonrpc:
+          type: string
+          const: "2.0"
+        id:
+          oneOf:
+            - type: integer
+            - type: string
+            - type: "null"
+        result:
+          type: object
+        error:
+          type: object
+          properties:
+            code: { type: integer }
+            message: { type: string }
+            data: {}
+    Input:
+      type: object
+      required: [kind]
+      description: One human input event. `kind` selects the variant.
+      properties:
+        kind:
+          type: string
+          enum: [click, key, scroll, control]
+        x: { type: number, description: "click: page CSS x" }
+        y: { type: number, description: "click: page CSS y" }
+        key: { type: string, description: "key: a named key (Enter/Tab/…) or printable char" }
+        dy: { type: number, description: "scroll: vertical wheel delta, +down" }
+        action: { type: string, enum: [pause, continue], description: "control: automation toggle" }
+    ErrorBody:
+      type: object
+      properties:
+        error:
+          type: string

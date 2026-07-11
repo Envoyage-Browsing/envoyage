@@ -1,0 +1,25 @@
+meta {
+  name: Session live-view SSE
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/sessions/{{sessionId}}/events
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+headers {
+  Accept: text/event-stream
+}
+
+docs {
+  A long-lived text/event-stream. Each event is named by its protocol type:
+  browser_frame, browser_cursor, browser_narration, browser_human_request,
+  browser_state. Bruno will hold the connection open — cancel to stop.
+}
