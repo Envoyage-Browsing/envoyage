@@ -1343,113 +1343,19 @@ pub fn decode_png_width(b64: &str) -> u32 {
     u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]])
 }
 
-/// In-page snapshot: role, accessible name, value, and CSS-pixel center for
-/// every relevant element. Returns JSON `{title,url,items:[…]}`. Kept as a
-/// string constant so it can be unit-inspected without a live browser.
-const AX_SNAPSHOT_JS: &str = r#"(() => {
-  const ROLE = (el) => {
-    const r = el.getAttribute('role');
-    if (r) return r;
-    const t = el.tagName.toLowerCase();
-    if (t === 'a' && el.href) return 'link';
-    if (t === 'button') return 'button';
-    if (t === 'select') return 'combobox';
-    if (t === 'textarea') return 'textbox';
-    if (t === 'input') {
-      const it = (el.type || 'text').toLowerCase();
-      if (it === 'checkbox') return 'checkbox';
-      if (it === 'radio') return 'radio';
-      if (it === 'submit' || it === 'button') return 'button';
-      return 'textbox';
-    }
-    return el.tagName.toLowerCase();
-  };
-  const INTERACTIVE = new Set(['link','button','textbox','checkbox','radio','combobox','listbox','select','menuitem','tab','switch']);
-  const NAME = (el, role, idx) => {
-    const al = el.getAttribute('aria-label'); if (al) return al.trim();
-    if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l && l.textContent.trim()) return l.textContent.trim(); }
-    const lbl = el.closest('label'); if (lbl && lbl.textContent.trim()) return lbl.textContent.trim();
-    if (el.placeholder) return el.placeholder.trim();
-    if (el.value && (el.tagName === 'BUTTON' || (el.tagName==='INPUT' && (el.type==='submit'||el.type==='button')))) return String(el.value).trim();
-    const txt = (el.textContent || '').trim(); if (txt) return txt.slice(0, 200);
-    // Icon-only controls (no aria-label/text): title → alt → role@position.
-    const title = el.getAttribute('title'); if (title) return title.trim();
-    const alt = el.getAttribute('alt'); if (alt) return alt.trim();
-    const img = el.querySelector && el.querySelector('img[alt]'); if (img && img.alt.trim()) return img.alt.trim();
-    return `${role}@${idx}`;
-  };
-  const items = [];
-  const sel = 'a[href],button,input,select,textarea,[role],[onclick],h1,h2,h3,p,li';
-  let idx = 0;
-  for (const el of document.querySelectorAll(sel)) {
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    const style = getComputedStyle(el);
-    if (style.visibility === 'hidden' || style.display === 'none') continue;
-    const role = ROLE(el);
-    // Stamp a stable handle so click/form_input can re-query the LIVE element
-    // and re-measure it after reflows.
-    el.setAttribute('data-immorterm-ref', String(idx));
-    let value = undefined;
-    if (role === 'checkbox' || role === 'radio') value = el.checked ? 'checked' : 'unchecked';
-    else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') value = String(el.value || '');
-    else if (el.tagName === 'SELECT') value = String(el.value || '');
-    items.push({
-      role, name: NAME(el, role, idx), value, idx,
-      interactive: INTERACTIVE.has(role),
-      cx: Math.round(rect.x + rect.width / 2),
-      cy: Math.round(rect.y + rect.height / 2),
-    });
-    idx++;
-  }
-  return JSON.stringify({ title: document.title, url: location.href, items });
-})()"#;
+/// In-page snapshot script — SINGLE SOURCE OF TRUTH in `shared/ax-snapshot.js`,
+/// imported verbatim so the Rust engine and the TS SDK can never diverge. The
+/// file's leading `//` doc-comment header is valid JS (a run of line comments
+/// before the IIFE), so `Runtime.evaluate` runs it unchanged. Returns JSON
+/// `{title,url,items:[…]}`.
+const AX_SNAPSHOT_JS: &str = include_str!("shared/ax-snapshot.js");
 
-/// In-page probe for a "human must take over" state. Returns JSON `{kind}` where
-/// `kind` is one of `password | captcha | cloudflare | oauth`, or `{}` when
-/// nothing needs a human. Priority: password and captcha/cloudflare bot-checks
-/// outrank a generic OAuth/login URL. Defensive: any error yields `{}`.
-const HUMAN_NEEDED_JS: &str = r#"(() => {
-  try {
-    const host = location.hostname.toLowerCase();
-    const path = location.pathname.toLowerCase();
-    const q = (sel) => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
-    const bodyText = (document.body && document.body.innerText || '').slice(0, 4000);
-
-    // Password entry — highest priority; passwords must never reach the AI.
-    const pw = document.querySelector('input[type=password]');
-    if (pw) {
-      const r = pw.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) return JSON.stringify({ kind: 'password' });
-    }
-
-    // CAPTCHA widgets.
-    if (q('iframe[src*="recaptcha"]') || q('iframe[src*="hcaptcha"]')) {
-      return JSON.stringify({ kind: 'captcha' });
-    }
-
-    // Cloudflare / Turnstile bot-check.
-    if (host === 'challenges.cloudflare.com'
-        || q('iframe[src*="challenges.cloudflare.com"]')
-        || q('.cf-turnstile')
-        || q('#challenge-running')
-        || /verify you are human|checking your browser/i.test(bodyText)) {
-      return JSON.stringify({ kind: 'cloudflare' });
-    }
-
-    // OAuth / sign-in consent — generic, lowest priority.
-    const oauthHosts = ['accounts.google.com', 'login.microsoftonline.com', 'appleid.apple.com'];
-    const isOauthHost = oauthHosts.includes(host)
-      || (host === 'github.com' && /\/login|\/session/.test(path));
-    if (isOauthHost && /oauth|authorize|login|signin/i.test(path)) {
-      return JSON.stringify({ kind: 'oauth' });
-    }
-
-    return '{}';
-  } catch (e) {
-    return '{}';
-  }
-})()"#;
+/// In-page "human must take over" probe — SINGLE SOURCE OF TRUTH in
+/// `shared/human-needed.js`, imported verbatim so the CAPTCHA/login/OAuth/
+/// password heuristics can never diverge from the TS SDK. Returns JSON `{kind}`
+/// (`password | captcha | cloudflare | oauth`) or `{}` when nothing needs a
+/// human. Same valid-JS header caveat as `AX_SNAPSHOT_JS`.
+const HUMAN_NEEDED_JS: &str = include_str!("shared/human-needed.js");
 
 #[cfg(test)]
 mod tests {
@@ -1713,8 +1619,9 @@ mod tests {
 
     #[test]
     fn human_needed_js_is_self_contained_iife() {
-        // Guards against truncation of the injected probe.
-        assert!(HUMAN_NEEDED_JS.trim_start().starts_with("(() =>"));
+        // Guards against truncation of the injected probe. Loaded from
+        // shared/human-needed.js, whose doc-comment header precedes the IIFE.
+        assert!(HUMAN_NEEDED_JS.contains("(() =>"));
         assert!(HUMAN_NEEDED_JS.contains("challenges.cloudflare.com"));
         assert!(HUMAN_NEEDED_JS.contains("input[type=password]"));
         assert!(HUMAN_NEEDED_JS.contains("JSON.stringify"));
@@ -1738,7 +1645,9 @@ mod tests {
     #[test]
     fn ax_snapshot_js_is_self_contained_iife() {
         // Guards against accidental truncation of the injected snapshot script.
-        assert!(AX_SNAPSHOT_JS.trim_start().starts_with("(() =>"));
+        // Loaded from shared/ax-snapshot.js, whose doc-comment header precedes
+        // the IIFE.
+        assert!(AX_SNAPSHOT_JS.contains("(() =>"));
         assert!(AX_SNAPSHOT_JS.contains("getBoundingClientRect"));
         assert!(AX_SNAPSHOT_JS.contains("JSON.stringify"));
         assert!(AX_SNAPSHOT_JS.trim_end().ends_with("})()"));

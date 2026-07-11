@@ -95,15 +95,15 @@ const REPLAY_TYPES: [&str; 4] =
 /// Broadcast one envelope to all WS clients (best-effort; no clients = no-op).
 /// Caches replay-worthy envelopes so a late joiner can be caught up on subscribe.
 pub fn broadcast_envelope(env: WsEnvelope) {
-    if let Some(kind) = REPLAY_TYPES.iter().find(|k| env.contains(&format!("\"type\":\"{k}\""))) {
-        if let Ok(mut map) = replay().lock() {
-            // A resume (browser_state paused:false) clears a stale handoff banner
-            // so a fresh client doesn't get banner-ed after the human finished.
-            if *kind == "browser_state" && env.contains("\"paused\":false") {
-                map.remove("browser_human_request");
-            }
-            map.insert(kind, env.clone());
+    if let Some(kind) = REPLAY_TYPES.iter().find(|k| env.contains(&format!("\"type\":\"{k}\"")))
+        && let Ok(mut map) = replay().lock()
+    {
+        // A resume (browser_state paused:false) clears a stale handoff banner
+        // so a fresh client doesn't get banner-ed after the human finished.
+        if *kind == "browser_state" && env.contains("\"paused\":false") {
+            map.remove("browser_human_request");
         }
+        map.insert(kind, env.clone());
     }
     let _ = channels().tx.send(env);
 }
