@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# Generated from ../src/shared/*.js by scripts/gen-shared.mjs (npm run gen).
+src/shared.ts
+package-lock.json
