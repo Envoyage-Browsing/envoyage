@@ -10,16 +10,51 @@
 use crate::browser::BrowserSession;
 use crate::protocol::Input;
 use crate::serve::recorder::Recording;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc};
 
-/// The single self-driven browser for this process. Launched lazily on first
-/// browser tool use, reused after.
-static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
+/// The default session id for transports that carry no session id of their own
+/// (the stdio MCP loop — one process per Claude session, so one session). The
+/// HTTP transport keys by the client's `Mcp-Session-Id` header instead.
+pub const DEFAULT_SESSION: &str = "stdio";
 
-pub fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
-    BROWSER.get_or_init(|| Mutex::new(None))
+/// One session's browser slot: the exact `Mutex<Option<BrowserSession>>` the
+/// single-browser design used, now one PER session so tool calls on different
+/// sessions never serialize against each other (a slow navigate in session A
+/// doesn't block session B). `Arc` so the caller can clone the slot out of the
+/// registry and drop the (short-lived) registry lock before running the tool.
+pub type BrowserSlot = Arc<Mutex<Option<BrowserSession>>>;
+
+/// The registry of self-driven browsers, keyed by session id. ONE `envoyage
+/// serve` process holds N independent [`BrowserSession`]s — each its own CDP
+/// connection (local spawn or remote `connect`) — so a cloud deployment can
+/// multiplex many agents through a single process. Each slot is launched lazily
+/// on that session's first browser tool use and reused after. All multi-session
+/// bookkeeping lives HERE in serve/; the crate's `BrowserSession` stays a single
+/// unchanged object.
+///
+/// The registry `Mutex` is held only to get-or-create a session's slot; the
+/// per-session `BrowserSlot` mutex is what serializes work within one session.
+static BROWSERS: OnceLock<Mutex<HashMap<String, BrowserSlot>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<String, BrowserSlot>> {
+    BROWSERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Get (or create) the browser slot for `session_id`. Cheap: clones an `Arc`.
+pub fn browser_slot(session_id: &str) -> BrowserSlot {
+    let mut map = registry().lock().expect("browser registry poisoned");
+    map.entry(session_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone()
+}
+
+/// Remove a session's slot entirely (on `browser_close`), returning it so the
+/// caller can reap the browser. The slot's `Drop` closes the browser if the
+/// caller doesn't take it out first.
+pub fn remove_session(session_id: &str) -> Option<BrowserSlot> {
+    registry().lock().ok().and_then(|mut m| m.remove(session_id))
 }
 
 /// A remote CDP WebSocket URL to drive INSTEAD of spawning a local browser.
@@ -37,17 +72,28 @@ pub fn cdp_url() -> Option<&'static str> {
     CDP_URL.get().and_then(|o| o.as_deref())
 }
 
-/// Paused flag toggled by the human via the WS UI. While paused envoyage still
-/// streams frames + forwards the human's input, but MCP tools return text-only
-/// (no screenshot to the model — passwords never leave to the LLM).
-static PAUSED: AtomicBool = AtomicBool::new(false);
+/// Per-session paused flag toggled by the human via the WS UI. While paused
+/// envoyage still streams frames + forwards the human's input for THAT session,
+/// but its MCP tools return text-only (no screenshot to the model — passwords
+/// never leave to the LLM). Per-session so a handoff in one session never pauses
+/// another's driving.
+static PAUSED: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
 
-pub fn is_paused() -> bool {
-    PAUSED.load(Ordering::Relaxed)
+fn paused_map() -> &'static Mutex<HashMap<String, bool>> {
+    PAUSED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn set_paused(v: bool) {
-    PAUSED.store(v, Ordering::Relaxed);
+pub fn is_paused(session_id: &str) -> bool {
+    paused_map()
+        .lock()
+        .map(|m| m.get(session_id).copied().unwrap_or(false))
+        .unwrap_or(false)
+}
+
+pub fn set_paused(session_id: &str, v: bool) {
+    if let Ok(mut m) = paused_map().lock() {
+        m.insert(session_id.to_string(), v);
+    }
 }
 
 /// A serialized protocol envelope (`{"type":"browser_*", ...}`) broadcast to
@@ -196,5 +242,33 @@ mod tests {
             !r2.iter().any(|e| e.contains("browser_human_request")),
             "resume clears the cached handoff banner"
         );
+    }
+
+    // The registry is the multi-session core: get-or-create returns the SAME slot
+    // for one id and DISTINCT slots for distinct ids; remove drops it; pause state
+    // is isolated per session.
+    #[test]
+    fn registry_and_pause_are_per_session() {
+        let a1 = browser_slot("sess-a");
+        let a2 = browser_slot("sess-a");
+        let b1 = browser_slot("sess-b");
+        // Same id → same underlying slot (Arc points at one Mutex).
+        assert!(Arc::ptr_eq(&a1, &a2), "one slot per session id");
+        assert!(!Arc::ptr_eq(&a1, &b1), "distinct sessions get distinct slots");
+
+        // Pause is isolated: pausing A must not pause B.
+        set_paused("sess-a", true);
+        assert!(is_paused("sess-a"));
+        assert!(!is_paused("sess-b"));
+
+        // Remove drops the slot; a later get-or-create makes a fresh (distinct) one.
+        assert!(remove_session("sess-a").is_some());
+        let a3 = browser_slot("sess-a");
+        assert!(!Arc::ptr_eq(&a1, &a3), "removed session is recreated fresh");
+
+        // Cleanup so process-global registry doesn't leak into other tests.
+        remove_session("sess-a");
+        remove_session("sess-b");
+        set_paused("sess-a", false);
     }
 }

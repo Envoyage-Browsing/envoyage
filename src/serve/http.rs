@@ -105,8 +105,19 @@ async fn mcp_http_handler(
         return StatusCode::ACCEPTED.into_response();
     }
 
-    // Same dispatch as stdio: one browser, one tool surface, new transport.
-    let response = mcp::handle_request(&request);
+    // Multi-session key: a remote agent picks its own browser by sending an
+    // `Mcp-Session-Id` header (the standard MCP session header). Each distinct id
+    // gets its own BrowserSession (its own CDP connection) in the registry, so
+    // one serve process multiplexes many agents. No header → the single default
+    // session (single-session HTTP, same as before).
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::serve::state::DEFAULT_SESSION);
+
+    // Same dispatch as stdio: registry-keyed browser, same tool surface.
+    let response = mcp::handle_request(session_id, &request);
     let json = serde_json::to_string(&response).unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal serialization error"}}"#
             .to_string()

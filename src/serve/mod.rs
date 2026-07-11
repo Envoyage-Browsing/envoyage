@@ -1,8 +1,13 @@
 //! `envoyage serve` — the runnable surface: an MCP stdio server + an optional WS
-//! frame stream, both driving one in-process browser.
+//! frame stream + an optional MCP-over-HTTP endpoint. ONE serve process holds a
+//! registry of N independent in-process browsers, keyed by session id (the stdio
+//! loop uses one implicit session; HTTP agents key by their `Mcp-Session-Id`
+//! header), so a cloud deployment can multiplex many agents — each its own CDP
+//! connection — through a single process.
 //!
 //! Layout:
-//! - [`state`] — process-global browser slot, pause flag, WS<->pump channels.
+//! - [`state`] — the per-session browser registry, per-session pause flag,
+//!   WS<->pump channels.
 //! - [`pump`] — the screencast pump + `with_browser` access + ownership lock.
 //! - [`mcp`] — the JSON-RPC MCP server and `browser_*` tool handlers.
 //! - [`http`] — MCP over Streamable HTTP (opt-in, for remote agents).

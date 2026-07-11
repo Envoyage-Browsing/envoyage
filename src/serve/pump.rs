@@ -19,14 +19,20 @@ static PUMP_STARTED: AtomicBool = AtomicBool::new(false);
 /// ~15fps. Frame coalescing means a slower tick just drops intermediate frames.
 const PUMP_TICK: Duration = Duration::from_millis(66);
 
-/// Ensure the process-global browser exists (launch on first use), then run `f`.
+/// Ensure this session's browser exists (launch on first use), then run `f`.
 /// Consults the ownership lock: refuse to launch over a live foreign owner's
 /// shared profile. Auto-resets a dead-pipe session so the next call relaunches.
+///
+/// `session_id` keys the registry — ONE serve process holds N independent
+/// browsers, one per session id. Different sessions never serialize against each
+/// other: each has its own slot mutex, held only for the duration of ITS `f`.
 pub fn with_browser<T>(
+    session_id: &str,
     launch_url: Option<&str>,
     f: impl FnOnce(&mut BrowserSession) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut guard = state::browser_slot()
+    let slot = state::browser_slot(session_id);
+    let mut guard = slot
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
     if guard.is_none() {
@@ -100,9 +106,10 @@ fn is_dead_pipe(msg: &str) -> bool {
         || m.contains("browser exited")
 }
 
-/// Apply one human input event to the live browser. Errors are swallowed — the
-/// human can retry, and a dead pipe surfaces on the next tool call.
-fn dispatch_input(b: &mut BrowserSession, ev: Input) {
+/// Apply one human input event to `session_id`'s live browser. Errors are
+/// swallowed — the human can retry, and a dead pipe surfaces on the next tool
+/// call.
+fn dispatch_input(session_id: &str, b: &mut BrowserSession, ev: Input) {
     match ev {
         Input::Click { x, y } => {
             let _ = b.click(x, y);
@@ -115,7 +122,7 @@ fn dispatch_input(b: &mut BrowserSession, ev: Input) {
         Input::Scroll { dy } => {
             let _ = b.scroll(dy);
         }
-        Input::Control { action } => state::set_paused(action == "pause"),
+        Input::Control { action } => state::set_paused(session_id, action == "pause"),
     }
 }
 
@@ -132,6 +139,15 @@ pub fn ensure_pump() {
 
 /// The pump body: each tick, dispatch queued human input, arm the screencast,
 /// and broadcast the newest frame. Holds the browser mutex only briefly.
+///
+/// ponytail: the live-view stream + WS input path is single-viewer — it streams
+/// the DEFAULT_SESSION (the stdio/WS session) onto the one broadcast bus, whose
+/// `browser_frame` envelope wire shape is byte-compatible with ImmorTerm's
+/// deployed panel. Additional HTTP sessions in the registry are DRIVEN
+/// independently (their own CDP connection) but not fanned out to a viewer yet;
+/// per-session frame fanout needs a session-id on the envelope (a wire change to
+/// the panel) and a per-session WS subscription — the upgrade path when a cloud
+/// deployment wants to watch a specific session's browser.
 fn pump_loop() {
     let mut seq: u64 = 0;
     // Target ids we've already seen. Each tick we follow any target that appeared
@@ -142,17 +158,18 @@ fn pump_loop() {
     // re-arms the screencast on the followed target. Switching to an EXISTING tab
     // (tabs_switch) never looks new, so a manual switch is never yanked back.
     let mut known: Vec<String> = Vec::new();
+    let slot = state::browser_slot(state::DEFAULT_SESSION);
     loop {
         std::thread::sleep(PUMP_TICK);
         let inputs = state::drain_input();
         let frame = {
-            let mut guard = match state::browser_slot().lock() {
+            let mut guard = match slot.lock() {
                 Ok(g) => g,
                 Err(_) => continue,
             };
             let Some(b) = guard.as_mut() else { continue };
             for ev in inputs {
-                dispatch_input(b, ev);
+                dispatch_input(state::DEFAULT_SESSION, b, ev);
             }
             // Auto-follow a genuinely-new target (popup/new tab) to both drive AND
             // stream it. Best-effort; refresh the baseline afterward.
