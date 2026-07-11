@@ -180,6 +180,63 @@ Not yet:
   it needs a real browser + network. Run it explicitly:
   `cargo test -- --ignored screencast --test-threads=1`.
 
+## Releasing
+
+Two npm publish lanes, **both tokenless** via [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (GitHub Actions OIDC + provenance — no `NPM_TOKEN` secret ever):
+
+| What | Package(s) | Workflow | Trigger |
+|------|-----------|----------|---------|
+| **SDK** | `@envoyage/browser` (`sdk/`) | `.github/workflows/publish-sdk.yml` | push a `sdk-v*` tag |
+| **CLI** | `@envoyage/cli` + `@envoyage/cli-{darwin-arm64,linux-x64,linux-arm64}` | `.github/workflows/release.yml` | manual (`workflow_dispatch`) |
+
+### Cut an SDK release
+
+```bash
+# 1. bump the version in sdk/package.json (e.g. 0.1.1 → 0.1.2)
+# 2. commit it, then tag + push:
+git commit -am "release(sdk): @envoyage/browser 0.1.2"
+git tag sdk-v0.1.2 && git push origin main sdk-v0.1.2
+```
+
+The tag fires `publish-sdk.yml`, which **guards that the tag matches
+`sdk/package.json`** (a mismatch fails the run), builds, and publishes with
+provenance. Verify: `npm view @envoyage/browser version`.
+
+### Cut a CLI release
+
+Bump `version` in the workspace `Cargo.toml` (or pass a `version` input), then:
+
+```bash
+gh workflow run release.yml -f version=0.1.1   # omit -f to use Cargo.toml
+```
+
+It builds the native binary for macOS arm64 + Linux x86_64/aarch64, ships each
+**as** its platform npm package (so `npm install` never touches GitHub Releases —
+works even while the repo is private), publishes the meta package, and cuts a
+GitHub Release.
+
+### First publish of a NEW package (one-time bootstrap)
+
+npm's Trusted Publisher config lives on a package's settings page, which
+**requires the package to already exist**. So each brand-new package name needs
+**one** credentialed first publish, after which it's tokenless forever:
+
+1. Bootstrap-publish once (a maintainer with an npm **Classic → Automation**
+   token, which bypasses 2FA — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+   exact one-liner). This creates the package.
+2. On npmjs.com → the package → **Settings → Trusted Publisher → GitHub
+   Actions**: org `Envoyage-Browsing`, repo `envoyage`, workflow file
+   (`publish-sdk.yml` for the SDK, `release.yml` for the CLI). Save.
+3. Every publish after that is tokenless CI — no token, no OTP.
+
+Gotchas that will bite you (all real, all learned here): scoped packages
+default to **private** — needs `publishConfig.access: public`; plain
+`npm publish` **ignores `NODE_AUTH_TOKEN`** locally (npm reads auth from
+`.npmrc` `_authToken`); a **granular** token scoped to "select packages"
+**cannot create a new package**; and `dist/` is gitignored, so a `prepack`
+build must regenerate it at pack time. Full runbook in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT OR Apache-2.0.
