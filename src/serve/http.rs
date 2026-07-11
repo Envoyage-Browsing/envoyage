@@ -140,8 +140,37 @@ async fn mcp_http_handler(
         .filter(|s| !s.is_empty())
         .unwrap_or(crate::serve::state::DEFAULT_SESSION);
 
-    // Same dispatch as stdio: registry-keyed browser, same tool surface.
-    let response = mcp::handle_request(session_id, &request);
+    // Same dispatch as stdio: registry-keyed browser, same tool surface. Run it
+    // on a BLOCKING thread: handle_request is fully synchronous — it takes
+    // blocking mutexes, sleeps (settle/wait_for_human), and — on the remote-CDP
+    // path — BrowserSession::connect builds its own tokio runtime and blocks on
+    // it. Calling any of that inline on this axum async worker panics with
+    // "Cannot start a runtime from within a runtime" (a nested block_on). So we
+    // hop to spawn_blocking, matching the stdio transport's dedicated thread.
+    let session_id = session_id.to_string();
+    let response = match tokio::task::spawn_blocking(move || {
+        mcp::handle_request(&session_id, &request)
+    })
+    .await
+    {
+        Ok(resp) => resp,
+        Err(join_err) => {
+            // The tool panicked on the blocking thread — surface a clean JSON-RPC
+            // error instead of dropping the connection (which is what shows up as
+            // an empty/EOF body on the client).
+            let error = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32603, "message": format!("tool panicked: {join_err}") }
+            });
+            return (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                error.to_string(),
+            )
+                .into_response();
+        }
+    };
     let json = serde_json::to_string(&response).unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal serialization error"}}"#
             .to_string()
