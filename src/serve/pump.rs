@@ -9,24 +9,35 @@ use super::state;
 use crate::browser::BrowserSession;
 use crate::browser_lock;
 use crate::protocol::{Frame, Input};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// True once the pump thread has been spawned (it idles cheaply when no browser
-/// is open, so spawn it at most once).
-static PUMP_STARTED: AtomicBool = AtomicBool::new(false);
+/// Session ids whose screencast pump thread is already running (each pump idles
+/// cheaply when its browser is closed, so spawn at most one per session).
+static PUMPS_STARTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn pumps_started() -> &'static Mutex<HashSet<String>> {
+    PUMPS_STARTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// ~15fps. Frame coalescing means a slower tick just drops intermediate frames.
 const PUMP_TICK: Duration = Duration::from_millis(66);
 
-/// Ensure the process-global browser exists (launch on first use), then run `f`.
+/// Ensure this session's browser exists (launch on first use), then run `f`.
 /// Consults the ownership lock: refuse to launch over a live foreign owner's
 /// shared profile. Auto-resets a dead-pipe session so the next call relaunches.
+///
+/// `session_id` keys the registry — ONE serve process holds N independent
+/// browsers, one per session id. Different sessions never serialize against each
+/// other: each has its own slot mutex, held only for the duration of ITS `f`.
 pub fn with_browser<T>(
+    session_id: &str,
     launch_url: Option<&str>,
     f: impl FnOnce(&mut BrowserSession) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut guard = state::browser_slot()
+    let slot = state::browser_slot(session_id);
+    let mut guard = slot
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
     if guard.is_none() {
@@ -100,9 +111,10 @@ fn is_dead_pipe(msg: &str) -> bool {
         || m.contains("browser exited")
 }
 
-/// Apply one human input event to the live browser. Errors are swallowed — the
-/// human can retry, and a dead pipe surfaces on the next tool call.
-fn dispatch_input(b: &mut BrowserSession, ev: Input) {
+/// Apply one human input event to `session_id`'s live browser. Errors are
+/// swallowed — the human can retry, and a dead pipe surfaces on the next tool
+/// call.
+fn dispatch_input(session_id: &str, b: &mut BrowserSession, ev: Input) {
     match ev {
         Input::Click { x, y } => {
             let _ = b.click(x, y);
@@ -115,37 +127,69 @@ fn dispatch_input(b: &mut BrowserSession, ev: Input) {
         Input::Scroll { dy } => {
             let _ = b.scroll(dy);
         }
-        Input::Control { action } => state::set_paused(action == "pause"),
+        Input::Control { action } => state::set_paused(session_id, action == "pause"),
     }
 }
 
-/// Start the screencast pump if it isn't already running. Idempotent.
-pub fn ensure_pump() {
-    if PUMP_STARTED.swap(true, Ordering::SeqCst) {
-        return;
+/// Start `session_id`'s screencast pump if it isn't already running. Idempotent
+/// per session: one process runs N pumps, one per session with a live browser,
+/// each streaming ITS browser's frames + draining ITS input onto ITS bus.
+pub fn ensure_pump_for(session_id: &str) {
+    {
+        let mut started = pumps_started().lock().expect("pumps registry poisoned");
+        if !started.insert(session_id.to_string()) {
+            return; // already running for this session
+        }
     }
+    let sid = session_id.to_string();
     std::thread::Builder::new()
-        .name("envoyage-screencast-pump".into())
-        .spawn(pump_loop)
+        .name(format!("envoyage-pump-{session_id}"))
+        .spawn(move || pump_loop(&sid))
         .ok();
 }
 
-/// The pump body: each tick, dispatch queued human input, arm the screencast,
-/// and broadcast the newest frame. Holds the browser mutex only briefly.
-fn pump_loop() {
+/// Back-compat: the stdio/WS surface streams the DEFAULT_SESSION.
+pub fn ensure_pump() {
+    ensure_pump_for(state::DEFAULT_SESSION);
+}
+
+/// The pump body for ONE session: each tick, dispatch that session's queued
+/// human input, arm its screencast, and broadcast the newest frame onto that
+/// session's bus. Holds the browser mutex only briefly.
+///
+/// The DEFAULT_SESSION pump's `browser_frame` envelope wire shape is byte-
+/// compatible with ImmorTerm's deployed WS panel; the per-session SSE surface
+/// (`GET /sessions/:id/events`) subscribes to the SAME per-session bus, so each
+/// remote session gets its own live view without any wire change.
+fn pump_loop(session_id: &str) {
     let mut seq: u64 = 0;
+    // Target ids we've already seen. Each tick we follow any target that appeared
+    // since — a popup/new tab opened WITHOUT a tool call (async OAuth redirect,
+    // "Sign in with Google" popup) — so the live view re-points to the newest
+    // active target instead of streaming a stale opener. `attach_target` (inside
+    // follow_new_target) resets screencast_on, so the ensure_screencast below
+    // re-arms the screencast on the followed target. Switching to an EXISTING tab
+    // (tabs_switch) never looks new, so a manual switch is never yanked back.
+    let mut known: Vec<String> = Vec::new();
+    let slot = state::browser_slot(session_id);
     loop {
         std::thread::sleep(PUMP_TICK);
-        let inputs = state::drain_input();
+        let inputs = state::drain_input_of(session_id);
         let frame = {
-            let mut guard = match state::browser_slot().lock() {
+            let mut guard = match slot.lock() {
                 Ok(g) => g,
                 Err(_) => continue,
             };
             let Some(b) = guard.as_mut() else { continue };
             for ev in inputs {
-                dispatch_input(b, ev);
+                dispatch_input(session_id, b, ev);
             }
+            // Auto-follow a genuinely-new target (popup/new tab) to both drive AND
+            // stream it. Best-effort; refresh the baseline afterward.
+            if !known.is_empty() {
+                b.follow_new_target(&known);
+            }
+            known = b.page_target_ids();
             if b.ensure_screencast().is_err() {
                 continue;
             }
@@ -164,7 +208,7 @@ fn pump_loop() {
             state::record_frame(&png);
             let f = Frame { png_base64: png, title, url, seq };
             if let Ok(env) = serde_json::to_string(&f.to_envelope()) {
-                state::broadcast_envelope(env);
+                state::broadcast_envelope_to(session_id, env);
             }
         }
     }

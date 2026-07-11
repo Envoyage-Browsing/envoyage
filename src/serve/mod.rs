@@ -1,11 +1,18 @@
 //! `envoyage serve` — the runnable surface: an MCP stdio server + an optional WS
-//! frame stream, both driving one in-process browser.
+//! frame stream + an optional MCP-over-HTTP endpoint. ONE serve process holds a
+//! registry of N independent in-process browsers, keyed by session id (the stdio
+//! loop uses one implicit session; HTTP agents key by their `Mcp-Session-Id`
+//! header), so a cloud deployment can multiplex many agents — each its own CDP
+//! connection — through a single process.
 //!
 //! Layout:
-//! - [`state`] — process-global browser slot, pause flag, WS<->pump channels.
+//! - [`state`] — the per-session browser registry, per-session pause flag,
+//!   WS<->pump channels.
 //! - [`pump`] — the screencast pump + `with_browser` access + ownership lock.
 //! - [`mcp`] — the JSON-RPC MCP server and `browser_*` tool handlers.
-//! - [`http`] — MCP over Streamable HTTP (opt-in, for remote agents).
+//! - [`http`] — the remote surface: MCP over Streamable HTTP + a per-session
+//!   live-view SSE stream (`GET /sessions/:id/events`) + input channel
+//!   (`POST /sessions/:id/input`), opt-in for remote agents + the SDK.
 //! - [`recorder`] — the `browser_gif` recording buffer + annotated-GIF export.
 //! - [`ws`] — the WS frame-stream server.
 
@@ -22,8 +29,11 @@ pub struct Options {
     pub mcp: bool,
     /// If set, also serve the WS frame stream on `127.0.0.1:<port>`.
     pub ws_port: Option<u16>,
-    /// If set, also serve MCP over Streamable HTTP on `<host>:<port>` (remote
-    /// agents). Bearer auth via `ENVOYAGE_AUTH_TOKEN` when that env var is set.
+    /// If set, also serve the remote surface on `<host>:<port>`: MCP over
+    /// Streamable HTTP (`POST /mcp`, session-routed via `Mcp-Session-Id`) plus a
+    /// per-session live-view SSE stream (`GET /sessions/:id/events`) and input
+    /// channel (`POST /sessions/:id/input`) — the Workers-safe surface the SDK
+    /// talks to. Bearer auth via `ENVOYAGE_AUTH_TOKEN` when that env var is set.
     pub http_port: Option<u16>,
     /// If set, drive a REMOTE browser over this CDP WebSocket URL instead of
     /// spawning a local Chromium (e.g. Cloudflare Browser Run).
