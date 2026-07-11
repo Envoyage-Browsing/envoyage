@@ -1,17 +1,15 @@
 {
-  "name": "ringtail-consumer-example",
+  "name": "envoyage-consumer-example",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Minimal example: consume envoyage from a TS product — drive a browser via MCP and render frames + a (placeholder Rocco) mascot cursor.",
+  "description": "Minimal example: consume envoyage from a TS product via the @envoyage/browser SDK — drive a browser, watch it live, and hand off to a human.",
   "scripts": {
     "driver": "tsx driver.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "ai": "^4.0.0",
-    "@ai-sdk/google": "^1.0.0"
+    "@envoyage/browser": "^0.1.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.1",

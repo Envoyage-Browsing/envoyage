@@ -1,33 +1,40 @@
 /**
- * viewer.ts — the UI side of consuming rudder.
+ * viewer.ts — the UI side, using @envoyage/browser in the browser.
  *
- * Connects to rudder's WS frame stream, paints each browser_frame onto a canvas,
- * and glides a mascot marker to every browser_cursor. rudder ships NO cursor —
- * the mascot here (an orange dot) is the placeholder a consumer skins.
+ * This is the minimal, framework-free version of envoyage-cloud's LiveView.tsx:
+ * `createSession({ endpoint, cdpUrl })`, subscribe to the SSE live view, paint
+ * each `frame` onto a canvas, glide a mascot marker to each `cursor`, show the
+ * handoff banner on `human-needed`, and forward the human's clicks/keys with
+ * `sendInput()` during a takeover. Same events, same SDK — just <canvas> instead
+ * of React.
  *
- *   // ringtail: replace the #rocco marker with the real <Rocco> sprite.
+ *   // consumer seam: replace the #mascot dot with your own sprite.
  *
- * It also forwards human clicks (page CSS px) back to rudder, and handles the
- * pause/handoff banner. Pair with driver.ts, which launches
- * `rudder serve --ws-port 8787`.
- *
- * Plain browser module — load via <script type="module"> (see index.html).
- * Served through any dev server that transpiles TS (e.g. `vite`), or precompile.
+ * The SDK talks fetch + SSE (no WebSocket), so this bundles into a Worker-served
+ * page unchanged. Load via <script type="module"> (see index.html); serve with a
+ * TS-aware dev server (e.g. `npx vite .`).
  */
 
-const WS_URL = "ws://127.0.0.1:8787";
+import { createSession, type BrowserSession, type CursorAction } from "@envoyage/browser";
+
+// Engine coordinates. In a real product these come from your backend (which
+// mints a per-user sessionId + hands out the engine endpoint + a CDP url).
+const ENDPOINT = "http://127.0.0.1:8788";
+const CDP_URL = "local"; // or a CF Browser Run "wss://…/cdp"
+const START_URL = "https://example.com";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
-const rocco = document.getElementById("rocco") as HTMLDivElement;
+const mascot = document.getElementById("mascot") as HTMLDivElement;
 const balloon = document.getElementById("balloon") as HTMLDivElement;
 const banner = document.getElementById("banner") as HTMLDivElement;
 const bannerText = document.getElementById("banner-text") as HTMLSpanElement;
+const takeOverBtn = document.getElementById("takeover") as HTMLButtonElement;
 const continueBtn = document.getElementById("continue") as HTMLButtonElement;
 const ctx = canvas.getContext("2d")!;
 
-// The letterbox fit of the current frame within the canvas (see consumers/README.md).
+// Letterbox fit of the current frame within the canvas.
 let fit = { scale: 1, offX: 0, offY: 0 };
-let lastSeq = -1;
+let driving = false; // the human has taken over during a handoff
 
 /** page CSS px → display px (place the mascot). */
 function toDisplay(x: number, y: number) {
@@ -38,75 +45,79 @@ function toPage(x: number, y: number) {
   return { x: (x - fit.offX) / fit.scale, y: (y - fit.offY) / fit.scale };
 }
 
-const ws = new WebSocket(WS_URL);
-ws.onopen = () => console.log("viewer: connected to rudder");
-ws.onclose = () => console.log("viewer: rudder closed the stream");
+const session: BrowserSession = createSession({ endpoint: ENDPOINT, cdpUrl: CDP_URL });
 
-ws.onmessage = (e: MessageEvent<string>) => {
-  const msg = JSON.parse(e.data) as
-    | { type: "browser_frame"; png_base64: string; title: string; url: string; seq: number }
-    | { type: "browser_cursor"; x: number; y: number; action: string }
-    | { type: "browser_narration"; text: string }
-    | { type: "browser_human_request"; reason: string; instructions?: string }
-    | { type: "browser_state"; paused: boolean };
+session.on("frame", (f) => {
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+    const w = img.width * scale;
+    const h = img.height * scale;
+    fit = { scale, offX: (canvas.width - w) / 2, offY: (canvas.height - h) / 2 };
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, fit.offX, fit.offY, w, h);
+  };
+  img.src = `data:image/png;base64,${f.pngBase64}`;
+});
 
-  switch (msg.type) {
-    case "browser_frame": {
-      if (msg.seq <= lastSeq) return; // drop stale/out-of-order frames
-      lastSeq = msg.seq;
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
-        const w = img.width * scale, h = img.height * scale;
-        fit = { scale, offX: (canvas.width - w) / 2, offY: (canvas.height - h) / 2 };
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, fit.offX, fit.offY, w, h);
-      };
-      img.src = `data:image/png;base64,${msg.png_base64}`;
-      break;
-    }
+session.on("cursor", (c) => {
+  // ── THE MASCOT SEAM: glide the mascot to where the agent is about to act. ──
+  const p = toDisplay(c.x, c.y);
+  mascot.style.left = `${p.x}px`;
+  mascot.style.top = `${p.y}px`;
+  mascot.className = (c.action ?? "move") as CursorAction; // pose per action
+});
 
-    case "browser_cursor": {
-      // ── THE MASCOT SEAM: glide Rocco to where the agent is about to act. ──
-      const p = toDisplay(msg.x, msg.y);
-      rocco.style.left = `${p.x}px`;
-      rocco.style.top = `${p.y}px`;
-      rocco.className = msg.action; // "click" | "type" | "move" | "scroll" → pose
-      break;
-    }
+session.on("narration", (n) => {
+  balloon.textContent = n.text;
+  balloon.style.left = mascot.style.left;
+  balloon.style.top = mascot.style.top;
+  balloon.classList.remove("hidden");
+});
 
-    case "browser_narration": {
-      // ringtail: a Rocco speech balloon. Anchor it above the mascot.
-      balloon.textContent = msg.text;
-      balloon.style.left = rocco.style.left;
-      balloon.style.top = rocco.style.top;
-      balloon.classList.remove("hidden");
-      break;
-    }
+session.on("human-needed", (h) => {
+  bannerText.textContent = `🙋 ${h.reason}${h.instructions ? " — " + h.instructions : ""}`;
+  banner.style.display = "block";
+});
 
-    case "browser_human_request": {
-      bannerText.textContent = `🙋 ${msg.reason}${msg.instructions ? " — " + msg.instructions : ""} — take over below, then press ▶ Continue.`;
-      banner.style.display = "block";
-      break;
-    }
-
-    case "browser_state": {
-      if (!msg.paused) banner.style.display = "none";
-      break;
-    }
+session.on("state", (s) => {
+  // Only a resume (paused:false) is authoritative: agent's back, clear the banner.
+  if (!s.paused) {
+    driving = false;
+    banner.style.display = "none";
   }
-};
+});
 
-// Human clicks the live view → page CSS px → rudder (used mainly while paused).
+// Drive to a real page so the frame isn't blank.
+session.open(START_URL).catch((e) => console.error("open failed:", e));
+
+// ── Handoff controls (the trust moment): take over → human drives; resume. ──
+takeOverBtn.addEventListener("click", () => {
+  session.sendInput({ kind: "control", action: "pause" });
+  driving = true;
+});
+continueBtn.addEventListener("click", () => {
+  session.sendInput({ kind: "control", action: "continue" });
+  driving = false;
+  banner.style.display = "none";
+});
+
+// The human clicks the live view → page CSS px → engine (used while driving).
 canvas.addEventListener("click", (ev) => {
+  if (!driving) return;
   const r = canvas.getBoundingClientRect();
-  // account for CSS scaling of the canvas element vs its pixel width.
   const px = ((ev.clientX - r.left) / r.width) * canvas.width;
   const py = ((ev.clientY - r.top) / r.height) * canvas.height;
   const { x, y } = toPage(px, py);
-  ws.send(JSON.stringify({ kind: "click", x, y }));
+  session.sendInput({ kind: "click", x, y });
 });
 
-continueBtn.addEventListener("click", () => {
-  ws.send(JSON.stringify({ kind: "control", action: "continue" }));
+window.addEventListener("keydown", (ev) => {
+  if (!driving) return;
+  const named = ["Enter", "Tab", "Backspace", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
+  const key = named.includes(ev.key) ? ev.key : ev.key.length === 1 ? ev.key : null;
+  if (key) {
+    ev.preventDefault();
+    session.sendInput({ kind: "key", key });
+  }
 });

@@ -3,17 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>rudder consumer — live view + Rocco</title>
+    <title>envoyage consumer — live view + mascot</title>
     <style>
       body { margin: 0; background: #14110f; color: #eee; font: 14px system-ui, sans-serif; }
       header { padding: 8px 12px; background: #1e1a17; }
       #stage { position: relative; width: 1280px; max-width: 100%; }
       canvas { display: block; width: 100%; background: #000; }
 
-      /* ── The mascot. rudder draws NOTHING; THIS is the consumer's skin. ──
-         ringtail: replace this element (and #balloon) with the real <Rocco> sprite.
+      /* ── The mascot. envoyage draws NOTHING; THIS is the consumer's skin. ──
+         consumer seam: replace this element (and #balloon) with your own sprite.
          The `left`/`top` transition is what makes it *glide* to the cursor point. */
-      #rocco {
+      #mascot {
         position: absolute; left: 0; top: 0; width: 36px; height: 36px;
         margin: -36px 0 0 -18px;         /* tip points at the target */
         border-radius: 50%;
@@ -22,8 +22,8 @@
         transition: left 260ms ease-out, top 260ms ease-out;
         pointer-events: none;
       }
-      #rocco.click { transform: scale(1.3); }   /* pose per browser_cursor.action */
-      #rocco.type  { transform: scale(0.85); }
+      #mascot.click { transform: scale(1.3); }   /* pose per browser_cursor.action */
+      #mascot.type  { transform: scale(0.85); }
 
       #balloon {
         position: absolute; transform: translate(-50%, -140%);
@@ -41,16 +41,18 @@
   </head>
   <body>
     <header>
-      rudder live view — the orange dot is a placeholder <b>Rocco</b>.
-      Run <code>npx tsx driver.ts</code> in this folder, then reload.
+      envoyage live view — the orange dot is a placeholder mascot.
+      Start <code>envoyage serve --http-port 8788</code>, serve this folder
+      (<code>npx vite .</code>), then open the printed URL.
     </header>
     <div id="stage">
       <canvas id="view" width="1280" height="800"></canvas>
-      <div id="rocco"></div>
+      <div id="mascot"></div>
       <div id="balloon" class="hidden"></div>
       <div id="banner">
         <span id="banner-text"></span>
-        <button id="continue">▶ Continue</button>
+        <button id="takeover">Take over</button>
+        <button id="continue">▶ Resume</button>
       </div>
     </div>
     <script type="module" src="./viewer.ts"></script>
