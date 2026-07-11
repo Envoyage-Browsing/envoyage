@@ -194,31 +194,35 @@ on the live view. Whoever can read the model's tool results can read the value �
 if the model is your LLM, treat `readPage()`/`find()` output as
 secret-bearing and don't echo it back into a prompt.
 
-### ⚠️ Gap: `readPage()`/`find()` are NOT password-blind
+### `readPage()`/`find()` are password-blind (fixed in 0.1.2)
 
-The password-blindness guarantee (the model never sees a password) is enforced
-**only on the screenshot-returning tools** (`open`/`click`/`type`/`key`/`scroll`
-→ `handle_browser_shot`, which suppresses the screenshot while paused/handed-off,
-`src/serve/mcp.rs:338`). **`readPage()` and `find()` do not consult the pause
-flag and do not run handoff detection** — they always return the full AX listing,
-and `AX_SNAPSHOT_JS` captures `el.value` for **every** input including
-`type="password"` (no password exclusion, `src/shared/ax-snapshot.js:54`).
+The value-read path is now closed on both layers:
 
-Consequences for a consumer:
+- **Password floor (always on).** `AX_SNAPSHOT_JS` never emits the typed value of
+  an `<input type="password">` — it drops the value and marks the item
+  `masked: true`. This is unconditional; there is no config to turn it off. A
+  password the human types during a handoff is **not** readable via
+  `readPage()`/`find()`.
+- **Paused suppression (belt-and-suspenders).** While a session is paused (any
+  handoff), `readPage()` and `find()` strip **all** input values server-side
+  before returning to the model — so a secret typed into a *non*-password field
+  during a handoff can't leak either. This mirrors the existing screenshot
+  suppression on `open`/`click`/`type`/`key`/`scroll`. Refs/roles/names are still
+  returned; only values are withheld.
+- **Configurable masking (PostHog-session-replay style).** Beyond the floor, the
+  engine masks a field's value when any of these match, driven by env vars
+  (`ENVOYAGE_MASK_ALL_INPUTS`, `ENVOYAGE_MASK_SELECTOR`):
+  - `maskAllInputs` — mask every input/textarea/select value;
+  - `maskSelector` — mask values of fields matching a CSS selector (a bad
+    selector is ignored, never throws);
+  - `[data-envoyage-mask]` — an always-honored attribute convention; mark any
+    field (or an ancestor) with it and its value is masked.
 
-- ✅ **Reading a non-secret value** (an API key the browser just *displayed*, a
-  generated token in a visible field) works cleanly — `readPage()` returns it.
-- ⚠️ **A password the human typed during a handoff IS readable** via `readPage()`
-  while the wall is up. The screen is hidden from the model, but the AX value is
-  not. If your model (not just your trusted daemon) can call `readPage()`, it can
-  read a password field's contents. Don't route `readPage()`/`find()` output to
-  an untrusted model on a page that has a live password field.
-
-If you need a hard guarantee, gate `readPage()`/`find()` yourself while
-`state.paused === true`, or file an engine change to redact
-`type="password"` values in `AX_SNAPSHOT_JS` and/or skip the value in
-`render_ax_listing` while paused. As of `@envoyage/browser@0.1.1` this is **not**
-done for you.
+Reading a **non-secret** value the page *displayed* (a generated token, an API
+key shown in a normal field) still works cleanly when the session is not paused
+and no mask matches. Whoever can read the model's tool results can read those
+returned values — so still treat `readPage()`/`find()` output as
+secret-bearing and don't echo it back into an untrusted prompt.
 
 ## Deploying & consuming
 

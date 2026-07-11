@@ -12,6 +12,140 @@ import {
   createSession,
 } from "./index.js";
 import { readSse } from "./sse.js";
+import { AX_SNAPSHOT_JS } from "./shared.js";
+
+// ── AX-snapshot masking (the security floor + PostHog-style config) ──────────
+// The shared IIFE is browser JS that reads globals off `document`/`window`. We
+// run it against a tiny mock DOM in Node to prove: (1) a type="password" value
+// is NEVER emitted, and (2) each configurable mask mode nulls the value + sets
+// masked:true. This is the same source the engine include_str!'s, so a pass
+// here means the engine masks identically.
+interface MockEl {
+  tagName: string;
+  type?: string;
+  value?: string;
+  attrs?: Record<string, string>;
+  matchesMask?: boolean; // does closest(maskSelector) / [data-envoyage-mask] hit?
+}
+
+function runAxSnapshot(els: MockEl[], maskCfg?: unknown): Array<Record<string, unknown>> {
+  const nodes = els.map((e) => ({
+    tagName: e.tagName,
+    type: e.type,
+    value: e.value ?? "",
+    checked: false,
+    id: "",
+    href: "",
+    placeholder: "",
+    textContent: "",
+    getAttribute: (k: string) => (e.attrs && k in e.attrs ? e.attrs[k] : null),
+    setAttribute: () => {},
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+    // Only the masking queries "match"; NAME's label/ancestor lookups must not,
+    // or NAME would read textContent off a bogus node.
+    closest: (q: string) =>
+      e.matchesMask && (q === "[data-envoyage-mask]" || q.startsWith(".") || q.startsWith("#") || q.startsWith("["))
+        ? { textContent: "" }
+        : null,
+    querySelector: () => null,
+  }));
+  const doc = {
+    title: "T",
+    querySelector: () => null,
+    querySelectorAll: () => nodes,
+  };
+  const fn = new Function(
+    "document",
+    "location",
+    "getComputedStyle",
+    "window",
+    `return (${AX_SNAPSHOT_JS});`,
+  );
+  const json = fn(
+    doc,
+    { href: "u" },
+    () => ({ visibility: "visible", display: "block" }),
+    { __ENVOYAGE_AX_MASK: maskCfg },
+  );
+  return JSON.parse(json).items;
+}
+
+test("ax-snapshot ALWAYS masks a type=password value (security floor)", () => {
+  const items = runAxSnapshot([{ tagName: "INPUT", type: "password", value: "hunter2" }]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].value, undefined, "password value must never be emitted");
+  assert.equal(items[0].masked, true);
+  // Belt-and-braces: the secret appears nowhere in the serialized snapshot.
+  assert.ok(!JSON.stringify(items).includes("hunter2"));
+});
+
+test("ax-snapshot emits a normal (non-password) input value by default", () => {
+  const items = runAxSnapshot([{ tagName: "INPUT", type: "text", value: "hello" }]);
+  assert.equal(items[0].value, "hello");
+  assert.equal(items[0].masked, undefined);
+});
+
+test("ax-snapshot maskAllInputs masks every input value", () => {
+  const items = runAxSnapshot([{ tagName: "INPUT", type: "text", value: "secret" }], {
+    maskAllInputs: true,
+  });
+  assert.equal(items[0].value, undefined);
+  assert.equal(items[0].masked, true);
+});
+
+test("ax-snapshot maskSelector masks matching inputs", () => {
+  const items = runAxSnapshot(
+    [{ tagName: "INPUT", type: "text", value: "ssn", matchesMask: true }],
+    { maskSelector: ".sensitive" },
+  );
+  assert.equal(items[0].value, undefined);
+  assert.equal(items[0].masked, true);
+});
+
+test("ax-snapshot bad maskSelector never throws (value simply unmasked)", () => {
+  // A syntactically invalid selector makes el.closest() throw; the IIFE wraps it
+  // in try/catch, so the snapshot must still complete and just not mask.
+  const throwingEl = {
+    tagName: "INPUT",
+    type: "text",
+    value: "kept",
+    checked: false,
+    id: "", href: "", placeholder: "", textContent: "",
+    getAttribute: () => null,
+    setAttribute: () => {},
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+    // Realistic: a valid `label` lookup returns null; only the (invalid) mask
+    // selector throws — exactly what a bad CFG.maskSelector does in a real DOM.
+    closest: (q: string) => { if (q === "label") return null; throw new Error("bad selector"); },
+    querySelector: () => null,
+  };
+  const doc = { title: "T", querySelector: () => null, querySelectorAll: () => [throwingEl] };
+  const fn = new Function("document", "location", "getComputedStyle", "window",
+    `return (${AX_SNAPSHOT_JS});`);
+  const json = fn(doc, { href: "u" }, () => ({ visibility: "visible", display: "block" }),
+    { __ENVOYAGE_AX_MASK: { maskSelector: "(((" } });
+  const items = JSON.parse(json).items;
+  assert.equal(items[0].value, "kept"); // did not throw, not masked
+  assert.equal(items[0].masked, undefined);
+});
+
+test("ax-snapshot [data-envoyage-mask] convention masks the value", () => {
+  const items = runAxSnapshot([
+    { tagName: "INPUT", type: "text", value: "card", matchesMask: true },
+  ]);
+  assert.equal(items[0].value, undefined);
+  assert.equal(items[0].masked, true);
+});
+
+test("ax-snapshot default cfg {} leaves normal inputs unmasked (password floor intact)", () => {
+  const items = runAxSnapshot([
+    { tagName: "INPUT", type: "text", value: "keep" },
+    { tagName: "INPUT", type: "password", value: "drop" },
+  ], {});
+  assert.equal(items[0].value, "keep");
+  assert.equal(items[1].value, undefined);
+  assert.equal(items[1].masked, true);
+});
 
 test("decodeEnvelope maps every protocol.rs envelope", () => {
   const frame = decodeEnvelope('{"type":"browser_frame","png_base64":"QUJD","title":"T","url":"u","seq":3}');

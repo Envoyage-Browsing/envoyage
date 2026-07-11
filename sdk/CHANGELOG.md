@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > breaking change gets a minor/major bump **and** its own CHANGELOG entry. Pin to
 > `~0.1.1` (or an exact version) and patch-upgrade safely.
 
+## [0.1.2] — 2026-07-11
+
+Security. **No API change** (adds an optional `PageElement.masked` field).
+
+### Security
+- Never expose password-input values: `AX_SNAPSHOT_JS` now always drops the
+  typed value of an `<input type="password">` (emits `masked: true`, no value) —
+  the model can no longer read a password via `readPage()`/`find()`.
+- Configurable input masking (PostHog-session-replay style): mask a field's
+  value via `maskAllInputs`, a `maskSelector` CSS selector, or the
+  `[data-envoyage-mask]` attribute convention. The engine drives these from the
+  `ENVOYAGE_MASK_ALL_INPUTS` / `ENVOYAGE_MASK_SELECTOR` env vars.
+- AX values are suppressed while a session is paused: `readPage()`/`find()` now
+  strip ALL input values during a handoff (matching the existing screenshot
+  suppression), so a secret typed into a non-password field can't leak either.
+
+### Added
+- Optional `masked?: boolean` on `PageElement` for consumers parsing
+  `AX_SNAPSHOT_JS` output directly.
+
 ## [0.1.1] — 2026-07-11
 
 Packaging / CI only. **No API change.**

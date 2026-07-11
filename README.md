@@ -152,6 +152,8 @@ cursor:
 | `ENVOYAGE_HOME` | `~/.envoyage` | Base dir for `browser.lock` + the persistent browser profile. |
 | `ENVOYAGE_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
 | `ENVOYAGE_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
+| `ENVOYAGE_MASK_ALL_INPUTS` | unset | `1`/`true` → mask **every** input/textarea/select value in the `read_page`/`find` AX listing (value withheld, `masked:true`). `<input type="password">` is always masked regardless. |
+| `ENVOYAGE_MASK_SELECTOR` | unset | CSS selector; any field matching it (or a descendant of a match) has its AX value masked. A bad selector is ignored, never throws. Also always-honored: mark a field or ancestor with the `[data-envoyage-mask]` attribute to mask it. |
 | `ENVOYAGE_GITHUB_REPO` | `Envoyage-Browsing/envoyage` | Release source for the npm wrapper. |
 
 Only one real browser drives the shared profile at a time — a cross-process

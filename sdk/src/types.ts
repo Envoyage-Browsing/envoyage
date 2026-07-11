@@ -144,6 +144,14 @@ export interface PageElement {
   role: string;
   name: string;
   value?: string;
+  /**
+   * True when the engine masked this element's value (a `type="password"` field,
+   * always; or a field matched by `maskAllInputs` / `maskSelector` /
+   * `[data-envoyage-mask]`). Present on items parsed directly from
+   * `AX_SNAPSHOT_JS`; the `render_ax_listing` text path simply omits the value,
+   * so `parseListing()` leaves this `undefined`.
+   */
+  masked?: boolean;
 }
 
 /** A parsed read_page / find snapshot. `raw` keeps the untrusted-framed text. */
