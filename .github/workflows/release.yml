@@ -181,26 +181,49 @@ jobs:
             require('fs').writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
           "
 
-      - name: Publish platform packages (npm Trusted Publishing)
+      # ── Auth mode ────────────────────────────────────────────────────────
+      # Default: OIDC Trusted Publishing (--provenance, no token). ONE-TIME
+      # BOOTSTRAP: npm won't let you configure a Trusted Publisher until a
+      # package exists, so the very first publish of these names needs a token.
+      # Set the NPM_TOKEN repo secret to bootstrap; delete it once the 4 packages
+      # exist + their Trusted Publishers are configured, and this reverts to OIDC.
+      - name: Publish platform packages
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd npm
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}" > "$HOME/.npmrc"
+            PUBLISH_FLAGS="--access public"            # token auth (provenance needs OIDC)
+            echo "::notice::Bootstrap mode — publishing with NPM_TOKEN (no provenance)"
+          else
+            PUBLISH_FLAGS="--provenance --access public"
+          fi
           # Platform packages first — the meta package's optionalDependencies resolve them.
           for PKG_DIR in packages/cli-linux-x64 packages/cli-linux-arm64 packages/cli-darwin-arm64; do
             if [ -f "$PKG_DIR/bin/envoyage" ]; then
               echo "Publishing $(basename "$PKG_DIR")..."
-              (cd "$PKG_DIR" && npx -y npm@latest publish --provenance --access public) || echo "::warning::Failed to publish $(basename "$PKG_DIR")"
+              (cd "$PKG_DIR" && npx -y npm@latest publish $PUBLISH_FLAGS) || echo "::warning::Failed to publish $(basename "$PKG_DIR")"
             else
               echo "::warning::Skipping $(basename "$PKG_DIR") — no binary"
             fi
           done
 
-      - name: Publish meta package (npm Trusted Publishing)
+      - name: Publish meta package
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd npm
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}" > "$HOME/.npmrc"
+            PUBLISH_FLAGS="--access public"
+          else
+            PUBLISH_FLAGS="--provenance --access public"
+          fi
           echo "Publishing @envoyage/cli (meta)..."
-          npx -y npm@latest publish --provenance --access public
+          npx -y npm@latest publish $PUBLISH_FLAGS
           echo "npm publish complete"
 
       - name: Create GitHub Release
