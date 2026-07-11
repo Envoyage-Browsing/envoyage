@@ -1,0 +1,63 @@
+name: Publish SDK
+
+# Publishes @envoyage/browser (sdk/) to npm via Trusted Publishing (OIDC) —
+# no NPM_TOKEN secret, provenance-signed. Same lane as release.yml's CLI publish.
+#
+# BEFORE THE FIRST TOKENLESS PUBLISH: on npmjs.com configure Trusted Publishing
+# for the @envoyage/browser package → GitHub Actions → repo
+# `Envoyage-Browsing/envoyage`, workflow file `publish-sdk.yml`.
+# (0.1.0 was bootstrapped with a one-off token; every publish after is tokenless.)
+#
+# Cut a version: bump sdk/package.json "version" → commit → tag + push:
+#     git tag sdk-vX.Y.Z && git push origin sdk-vX.Y.Z
+# This workflow publishes that version. The tag must match package.json (guarded).
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish @envoyage/browser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install SDK deps
+        working-directory: sdk
+        run: npm ci
+
+      - name: Guard — tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#sdk-v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag sdk-v$TAG_VERSION does not match sdk/package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "version $PKG_VERSION OK"
+
+      - name: Publish (Trusted Publishing)
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          # publish runs `prepack` (build + strip tests). npm >= 11.5.1 needed for --provenance.
+          npx -y npm@latest publish --provenance --access public
+          echo "@envoyage/browser $(node -p "require('./package.json').version") published" >> "$GITHUB_STEP_SUMMARY"
