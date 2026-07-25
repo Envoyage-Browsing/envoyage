@@ -26,7 +26,9 @@ futures-util = "0.3"
 # MCP Streamable HTTP transport (opt-in via `envoyage serve --http-port`). Matches
 # the axum-based shape immorterm-memory uses for its MCP HTTP handler.
 axum = "0.8"
-image = { version = "0.25.10", default-features = false, features = ["png", "gif"] }
+# jpeg is REQUIRED: the live screencast is JPEG, and the GIF recorder decodes
+# those frames — without the jpeg decoder, export() fails at runtime.
+image = { version = "0.25.10", default-features = false, features = ["png", "gif", "jpeg"] }
 imageproc = { version = "0.27.0", default-features = false }
 
 [dev-dependencies]

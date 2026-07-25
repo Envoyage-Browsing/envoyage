@@ -51,8 +51,8 @@ pub fn with_browser<T>(
         // Remote path: drive a browser we did NOT spawn (Cloudflare Browser Run
         // etc.). No broker lock — that's about a local shared profile dir, which
         // a remote connection has neither of.
-        if let Some(cdp_url) = state::cdp_url() {
-            let session = BrowserSession::connect(&rt, cdp_url)?;
+        if let Some(cdp_url) = state::cdp_url_for(session_id) {
+            let session = BrowserSession::connect(&rt, &cdp_url)?;
             if let Some(url) = launch_url {
                 // A remote browser is already on a page; honor an explicit open.
                 let mut s = session;
@@ -173,7 +173,10 @@ fn pump_loop(session_id: &str) {
     let mut known: Vec<String> = Vec::new();
     let slot = state::browser_slot(session_id);
     loop {
-        std::thread::sleep(PUMP_TICK);
+        // Block until human input arrives (dispatched immediately) or the frame
+        // tick elapses — instead of always sleeping the full tick, which added up
+        // to PUMP_TICK of latency before an input was even sent to the browser.
+        state::park_until_input_or(session_id, PUMP_TICK);
         let inputs = state::drain_input_of(session_id);
         let frame = {
             let mut guard = match slot.lock() {

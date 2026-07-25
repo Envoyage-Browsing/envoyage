@@ -25,6 +25,7 @@ pub mod browser;
 pub mod browser_lock;
 pub mod protocol;
 pub mod serve;
+pub mod stealth;
 pub mod transport;
 
 pub use browser::{BrowserSession, HandoffReason};

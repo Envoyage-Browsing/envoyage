@@ -154,6 +154,17 @@ async fn mcp_http_handler(
     // "Cannot start a runtime from within a runtime" (a nested block_on). So we
     // hop to spawn_blocking, matching the stdio transport's dedicated thread.
     let session_id = session_id.to_string();
+    // Per-session remote browser: the dashboard sends the freshly-minted
+    // Cloudflare Browser Rendering connection URL as `x-envoyage-cdp-url`. Record
+    // it so THIS session's `with_browser` connects to ITS browser (isolation),
+    // rather than the process-global `--cdp-url` (shared) or a local spawn.
+    if let Some(url) = headers
+        .get("x-envoyage-cdp-url")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        crate::serve::state::set_session_cdp_url(&session_id, url.to_string());
+    }
     let response = match tokio::task::spawn_blocking(move || {
         mcp::handle_request(&session_id, &request)
     })

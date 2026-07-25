@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Anti-detection layer** ([`src/stealth.rs`](src/stealth.rs), applied in
+  `attach_target` so both the local-spawn and remote-`connect` paths + popups
+  inherit it): `--disable-blink-features=AutomationControlled` +
+  `--lang=en-US` launch flags; a `Network.setUserAgentOverride` that strips the
+  `HeadlessChrome` token and supplies a `userAgentMetadata` derived from the live
+  binary (UA string, UA header, Sec-CH-UA and `navigator.userAgentData` all stay
+  consistent); and a document-start shim giving a realistic screen/window
+  envelope. Passes the full bot.sannysoft.com table and every rebrowser-bot-
+  detector check on Chrome 149. See [`docs/stealth.md`](docs/stealth.md).
+- **Humanized input**: clicks trace a jittered eased pointer path and land
+  off-center with a press→release dwell; typing fires real per-character
+  `keydown`/`keyup` (was a single paste-like `Input.insertText`); scrolling is a
+  burst of eased off-center wheel ticks. Defeats behavioral bot scoring.
+- **Per-session remote browsers**: the `x-envoyage-cdp-url` request header is now
+  honored (via `state::set_session_cdp_url`/`cdp_url_for`), so each remote session
+  drives its OWN Cloudflare Browser Rendering browser instead of every session
+  collapsing onto the one process-global `--cdp-url` (or silently spawning local).
+
+### Fixed
+- **GIF export was completely broken** since the screencast switched to JPEG: the
+  recorder decoded frames as PNG and the `image` crate lacked the `jpeg` feature,
+  so every `browser_gif` export failed. Enabled `jpeg`, switched to
+  format-sniffing decode, and corrected the replay frame delay (33 → 66 ms; GIFs
+  were playing ~2× speed).
+- **Input latency**: human input is now dispatched the instant it arrives (a wake
+  channel parks the pump) instead of waiting out the up-to-66 ms frame tick.
+- The `about:blank`-first boot + navigate ensures the stealth pre-load script
+  covers the FIRST page (a script added via `addScriptToEvaluateOnNewDocument`
+  only affects future documents).
+
+### Changed
+- Live screencast JPEG quality 75 → 88 (sharper small text / 1px borders at 1:1
+  CSS-px capture); `Page.screencastFrameAck` is now fire-and-forget (no blocking
+  round-trip per frame while the pump holds the browser mutex).
+
 ## [0.1.1] - 2026-07-11
 
 First `@envoyage/cli` release published tokenlessly via npm Trusted Publishing (OIDC). Carries the serve/security work below.
