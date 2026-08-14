@@ -26,7 +26,10 @@ const MAX_PATH_RULES: usize = 50;
 const MAX_PATH_RULE_BYTES: usize = 256;
 const MAX_PAGE_LIMIT: u32 = 2_000;
 const MAX_ASSET_LIMIT: u32 = 20_000;
-const MAX_CONTENT_BYTES: u64 = 250 * 1024 * 1024;
+// A complete fashion Collection can contain more than a thousand original
+// gallery images. Keep the ordinary 64 MiB default, but allow an explicitly
+// authorized caller to request a still-bounded 1 GiB evidence snapshot.
+const MAX_CONTENT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DURATION_SECS: u64 = 3_600;
 const MAX_CONCURRENCY: u16 = 20;
 const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024;
@@ -2093,6 +2096,21 @@ mod tests {
             validate_request(req, false)
                 .unwrap_err()
                 .contains("maxPages")
+        );
+
+        let mut req = request();
+        req.limits.max_content_bytes = MAX_CONTENT_BYTES;
+        assert_eq!(
+            validate_request(req, false).unwrap().limits.max_content_bytes,
+            1024 * 1024 * 1024
+        );
+
+        let mut req = request();
+        req.limits.max_content_bytes = MAX_CONTENT_BYTES + 1;
+        assert!(
+            validate_request(req, false)
+                .unwrap_err()
+                .contains("maxContentBytes")
         );
     }
 

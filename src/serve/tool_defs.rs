@@ -43,7 +43,7 @@ fn tool_defs() -> Vec<Value> {
                                     "maxPages": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 500 },
                                     "maxDepth": { "type": "integer", "minimum": 0, "maximum": 20, "default": 6 },
                                     "maxAssets": { "type": "integer", "minimum": 1, "maximum": 20000, "default": 5000 },
-                                    "maxContentBytes": { "type": "integer", "minimum": 1, "maximum": 262144000, "default": 67108864 },
+                                    "maxContentBytes": { "type": "integer", "minimum": 1, "maximum": 1073741824, "default": 67108864 },
                                     "maxDurationSecs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 900 },
                                     "maxConcurrency": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
                                 }
