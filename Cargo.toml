@@ -1,6 +1,6 @@
 [package]
 name = "envoyage"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Drive a real headless browser from any AI agent, live — with a mascot-neutral cursor/narration protocol."
 license = "MIT OR Apache-2.0"
@@ -26,7 +26,12 @@ futures-util = "0.3"
 # MCP Streamable HTTP transport (opt-in via `envoyage serve --http-port`). Matches
 # the axum-based shape immorterm-memory uses for its MCP HTTP handler.
 axum = "0.8"
-image = { version = "0.25.10", default-features = false, features = ["png", "gif"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+sha2 = "0.10"
+url = { version = "2", features = ["serde"] }
+# jpeg is REQUIRED: the live screencast is JPEG, and the GIF recorder decodes
+# those frames — without the jpeg decoder, export() fails at runtime.
+image = { version = "0.25.10", default-features = false, features = ["png", "gif", "jpeg"] }
 imageproc = { version = "0.27.0", default-features = false }
 
 [dev-dependencies]

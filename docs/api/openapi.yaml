@@ -1,11 +1,12 @@
 openapi: 3.1.0
 info:
   title: envoyage serve — remote surface
-  version: 0.1.0
+  version: 0.2.0
   description: |
     The HTTP surface of `envoyage serve --http-port N`: MCP-over-Streamable-HTTP
-    driving plus a per-session live view (SSE) and input channel. Workers-safe —
-    plain `fetch` + Server-Sent Events, no WebSocket on this surface.
+    driving, a per-session live view (SSE) and input channel, and bounded public
+    website crawling. Workers-safe — plain `fetch` + Server-Sent Events, no
+    WebSocket on this surface.
 
     **Source of truth.** This spec documents the ACTUAL routes in
     `src/serve/http.rs`. Keep it in sync with the Bruno collection at
@@ -46,7 +47,9 @@ paths:
         `browser_tabs_switch`, `browser_close`, `browser_request_human`,
         `browser_wait_for_human`, `browser_wait_for`, `browser_console`,
         `browser_network`, `browser_upload`, `browser_gif`, and the env-gated
-        `browser_eval` (`ENVOYAGE_BROWSER_EVAL=1`).
+        `browser_eval` (`ENVOYAGE_BROWSER_EVAL=1`). Bounded crawling adds
+        `crawl_start`, `crawl_read` and `crawl_cancel`; all three use the same
+        domain service as the REST routes below.
       parameters:
         - $ref: '#/components/parameters/McpSessionId'
         - name: Accept
@@ -204,6 +207,111 @@ paths:
         "401":
           $ref: '#/components/responses/Unauthorized'
 
+  /crawls:
+    post:
+      operationId: startCrawl
+      summary: Start one bounded public-site crawl
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 200 }
+          description: Exact replay key. A changed request with the same key fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CrawlRequest' }
+      responses:
+        "202":
+          description: Crawl accepted, or exact replay of the original crawl.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CrawlJob' }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "503":
+          description: No crawl provider is configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorBody' }
+
+  /crawls/{crawlId}:
+    get:
+      operationId: readCrawl
+      summary: Read one normalized crawl result page
+      parameters:
+        - $ref: '#/components/parameters/CrawlId'
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 16384 }
+          description: Opaque cursor returned by the prior read. Pass unchanged.
+      responses:
+        "200":
+          description: Normalized crawl state and one bounded result page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CrawlJob' }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: cancelCrawl
+      summary: Cancel one exact crawl
+      parameters:
+        - $ref: '#/components/parameters/CrawlId'
+      responses:
+        "200":
+          description: Crawl cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CrawlJob' }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /crawls/{crawlId}/assets/{assetId}:
+    get:
+      operationId: downloadCrawlAsset
+      summary: Download one raster image listed by this crawl
+      description: |
+        The asset must have appeared in a result page already read for this job.
+        Envoyage re-checks the allowed host and public DNS address after every
+        redirect, enforces the job byte budget and replays the first cached bytes.
+      parameters:
+        - $ref: '#/components/parameters/CrawlId'
+        - name: assetId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+      responses:
+        "200":
+          description: Exact cached raster bytes.
+          headers:
+            X-Envoyage-Content-Sha256:
+              schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/avif: { schema: { type: string, format: binary } }
+            image/heic: { schema: { type: string, format: binary } }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -228,6 +336,14 @@ components:
       schema:
         type: string
       description: Picks/creates the browser session. Omit → default `stdio` session.
+    CrawlId:
+      name: crawlId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^crawl-[a-f0-9]{32}$'
+      description: Opaque Envoyage crawl id. Provider job ids are never exposed.
 
   responses:
     Unauthorized:
@@ -238,6 +354,16 @@ components:
             $ref: '#/components/schemas/ErrorBody'
           example:
             error: "missing or invalid bearer token"
+    BadRequest:
+      description: Invalid request, cursor, idempotency replay or bounded crawl input.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+    NotFound:
+      description: Crawl or crawl asset not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
 
   schemas:
     JsonRpcRequest:
@@ -291,6 +417,131 @@ components:
         key: { type: string, description: "key: a named key (Enter/Tab/…) or printable char" }
         dy: { type: number, description: "scroll: vertical wheel delta, +down" }
         action: { type: string, enum: [pause, continue], description: "control: automation toggle" }
+    CrawlRequest:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url: { type: string, format: uri, maxLength: 2048 }
+        adapter:
+          type: string
+          enum: [auto, generic, shopify_collection]
+          default: auto
+        allowedHosts:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 253 }
+        includePaths:
+          type: array
+          maxItems: 50
+          items: { type: string, maxLength: 256 }
+        excludePaths:
+          type: array
+          maxItems: 50
+          items: { type: string, maxLength: 256 }
+        discovery:
+          type: string
+          enum: [sitemap_and_links, sitemap_only, links_only]
+          default: sitemap_and_links
+        render:
+          type: string
+          enum: [auto, static, browser]
+          default: auto
+        capture:
+          $ref: '#/components/schemas/CrawlCapture'
+        limits:
+          $ref: '#/components/schemas/CrawlLimits'
+    CrawlCapture:
+      type: object
+      additionalProperties: false
+      properties:
+        sections: { type: boolean, default: true }
+        links: { type: boolean, default: true }
+        media: { type: boolean, default: true }
+        markdown: { type: boolean, default: false }
+        html: { type: boolean, default: false }
+    CrawlLimits:
+      type: object
+      additionalProperties: false
+      properties:
+        maxPages: { type: integer, minimum: 1, maximum: 2000, default: 500 }
+        maxDepth: { type: integer, minimum: 0, maximum: 20, default: 6 }
+        maxAssets: { type: integer, minimum: 1, maximum: 20000, default: 5000 }
+        maxContentBytes: { type: integer, minimum: 1, maximum: 1073741824, default: 67108864 }
+        maxDurationSecs: { type: integer, minimum: 1, maximum: 3600, default: 900 }
+        maxConcurrency: { type: integer, minimum: 1, maximum: 20, default: 5 }
+    CrawlJob:
+      type: object
+      required: [id, adapter, adapterVersion, state, requestFingerprint, createdAtMs, progress, pages, warnings]
+      properties:
+        id: { type: string, pattern: '^crawl-[a-f0-9]{32}$' }
+        adapter: { type: string }
+        adapterVersion: { type: string }
+        state: { type: string, enum: [queued, running, completed, failed, cancelled] }
+        requestFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        createdAtMs: { type: integer, minimum: 0 }
+        progress: { $ref: '#/components/schemas/CrawlProgress' }
+        pages:
+          type: array
+          items: { $ref: '#/components/schemas/CrawlPage' }
+        nextCursor: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
+        error: { type: string }
+    CrawlProgress:
+      type: object
+      required: [completedPages, totalPages, returnedPages, returnedAssets, returnedContentBytes]
+      properties:
+        completedPages: { type: integer, minimum: 0 }
+        totalPages: { type: integer, minimum: 0 }
+        returnedPages: { type: integer, minimum: 0 }
+        returnedAssets: { type: integer, minimum: 0 }
+        returnedContentBytes: { type: integer, minimum: 0 }
+    CrawlPage:
+      type: object
+      required: [url, breadcrumbs, sections, links, media, contentSha256, truncated]
+      properties:
+        url: { type: string, format: uri }
+        canonicalUrl: { type: string, format: uri }
+        pageType: { type: string }
+        productKey: { type: string }
+        breadcrumbs:
+          type: array
+          items: { type: string }
+        title: { type: string }
+        description: { type: string }
+        statusCode: { type: integer, minimum: 100, maximum: 599 }
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/CrawlSection' }
+        links:
+          type: array
+          items: { type: string, format: uri }
+        media:
+          type: array
+          items: { $ref: '#/components/schemas/CrawlMedia' }
+        markdown: { type: string }
+        html: { type: string }
+        contentSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        truncated: { type: boolean }
+    CrawlSection:
+      type: object
+      required: [level, heading, text]
+      properties:
+        level: { type: integer, minimum: 1, maximum: 6 }
+        heading: { type: string }
+        text: { type: string }
+    CrawlMedia:
+      type: object
+      required: [id, position, url]
+      properties:
+        id: { type: string, pattern: '^[a-f0-9]{64}$' }
+        position: { type: integer, minimum: 0 }
+        url: { type: string, format: uri }
+        alt: { type: string }
+        width: { type: integer, minimum: 1 }
+        height: { type: integer, minimum: 1 }
     ErrorBody:
       type: object
       properties:

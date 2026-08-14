@@ -19,6 +19,10 @@ a bug.
 | POST | `/mcp` | JSON-RPC 2.0 MCP request (driving). Session via `Mcp-Session-Id`. |
 | GET | `/sessions/{id}/events` | Per-session live-view SSE stream (frame/cursor/narration/handoff/state). |
 | POST | `/sessions/{id}/input` | Push one human input event (click/key/scroll/control). |
+| POST | `/crawls` | Start one bounded public-site crawl with an exact `Idempotency-Key`. |
+| GET | `/crawls/{id}` | Read normalized pages, progress and an opaque next cursor. |
+| DELETE | `/crawls/{id}` | Cancel one exact crawl. |
+| GET | `/crawls/{id}/assets/{assetId}` | Download one bounded raster image listed by that crawl. |
 
 There is no `/health` route. Auth is `Authorization: Bearer <ENVOYAGE_AUTH_TOKEN>`
 on every route when the token is set.

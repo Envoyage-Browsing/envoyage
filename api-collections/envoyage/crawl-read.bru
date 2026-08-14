@@ -1,0 +1,19 @@
+meta {
+  name: Crawl — read
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/crawls/{{crawlId}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+headers {
+  Accept: application/json
+}

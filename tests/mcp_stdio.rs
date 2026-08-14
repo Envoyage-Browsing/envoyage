@@ -51,17 +51,30 @@ fn initialize_and_list_tools() {
     assert_eq!(resps[0]["result"]["serverInfo"]["name"], "envoyage");
     assert!(resps[0]["result"]["capabilities"]["tools"].is_object());
 
-    // Every tool is neutrally named `browser_*` (no `immorterm_` leakage).
+    // Every tool is neutrally named by its Envoyage capability (no consumer
+    // product prefix such as `immorterm_` or `flam_` may leak here).
     let tools = resps[1]["result"]["tools"].as_array().unwrap();
     assert!(!tools.is_empty());
     for t in tools {
         let name = t["name"].as_str().unwrap();
-        assert!(name.starts_with("browser_"), "leaked tool name: {name}");
+        assert!(
+            name.starts_with("browser_") || name.starts_with("crawl_"),
+            "leaked tool name: {name}"
+        );
         assert!(t["inputSchema"]["type"] == "object");
     }
     // The core surface is present.
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in ["browser_open", "browser_read_page", "browser_click", "browser_request_human", "browser_gif"] {
+    for expected in [
+        "crawl_start",
+        "crawl_read",
+        "crawl_cancel",
+        "browser_open",
+        "browser_read_page",
+        "browser_click",
+        "browser_request_human",
+        "browser_gif",
+    ] {
         assert!(names.contains(&expected), "missing {expected}");
     }
     // eval is gated OFF by default.
@@ -80,7 +93,10 @@ fn eval_tool_appears_only_when_enabled() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"browser_eval"), "eval tool should appear with ENVOYAGE_BROWSER_EVAL=1");
+    assert!(
+        names.contains(&"browser_eval"),
+        "eval tool should appear with ENVOYAGE_BROWSER_EVAL=1"
+    );
 }
 
 #[test]

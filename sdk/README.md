@@ -329,8 +329,11 @@ mirrors the engine's password > captcha > cloudflare > oauth priority.
 | Method + route | Purpose |
 |---|---|
 | `POST /mcp` | JSON-RPC `tools/call` for all driving methods (exists today). |
-| `GET /events` | SSE stream of `browser_frame`/`cursor`/`narration`/`human_request`/`state` envelopes. |
-| `POST /input` | Forward one `Input` event (`click`/`key`/`scroll`/`control`). |
+| `GET /sessions/:id/events` | SSE stream of `browser_frame`/`cursor`/`narration`/`human_request`/`state` envelopes. |
+| `POST /sessions/:id/input` | Forward one `Input` event (`click`/`key`/`scroll`/`control`). |
+| `POST /crawls` | Start one bounded public-site crawl. |
+| `GET` / `DELETE /crawls/:id` | Read or cancel one crawl. |
+| `GET /crawls/:id/assets/:assetId` | Download one exact raster image listed by that crawl. |
 
 Headers: `Mcp-Session-Id` (multi-session key), `Authorization: Bearer <token>`
 (when the engine sets `ENVOYAGE_AUTH_TOKEN`), and `X-Envoyage-Cdp-Url` (per-session
@@ -340,4 +343,11 @@ remote browser to connect on lazy launch).
 > the engine's existing WebSocket live-view surface (`src/serve/ws.rs`) — the SSE
 > envelopes are byte-for-byte the same `src/protocol.rs` shapes. The Workers-safe
 > core path deliberately uses SSE, not WebSocket.
-```
+
+### Bounded crawling
+
+`createCrawlClient()` uses the same Envoyage server for bounded public-site
+inventory. It supports `start`, `read`, `cancel` and job-scoped
+`downloadAsset`; no provider credential or provider job URL enters the SDK.
+See [`../docs/crawling.md`](../docs/crawling.md) for the complete example and
+limits.

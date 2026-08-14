@@ -72,6 +72,39 @@ pub fn cdp_url() -> Option<&'static str> {
     CDP_URL.get().and_then(|o| o.as_deref())
 }
 
+/// Per-session remote CDP URLs from the `x-envoyage-cdp-url` request header. The
+/// dashboard mints a FRESH Cloudflare Browser Rendering browser per session and
+/// sends its connection URL here, so each session drives its OWN remote browser
+/// (real isolation) instead of every session collapsing onto the one process-
+/// global `--cdp-url` — or silently falling through to a local spawn.
+static SESSION_CDP_URLS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn session_cdp_urls() -> &'static Mutex<HashMap<String, String>> {
+    SESSION_CDP_URLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a per-session remote CDP URL (from the request header). Last write wins
+/// so that after a session's remote browser expires and the dashboard mints a new
+/// one, the next (re)connect targets the fresh URL. Consulted only at connect
+/// time (`with_browser` caches the live browser), so this never yanks a live one.
+pub fn set_session_cdp_url(session_id: &str, url: String) {
+    session_cdp_urls()
+        .lock()
+        .expect("session cdp urls poisoned")
+        .insert(session_id.to_string(), url);
+}
+
+/// The remote CDP URL to use for `session_id`: the per-session header value if
+/// present, else the process-global `--cdp-url`. `None` ⇒ spawn a local browser.
+pub fn cdp_url_for(session_id: &str) -> Option<String> {
+    if let Ok(m) = session_cdp_urls().lock()
+        && let Some(u) = m.get(session_id)
+    {
+        return Some(u.clone());
+    }
+    cdp_url().map(str::to_string)
+}
+
 /// Per-session paused flag toggled by the human via the WS UI. While paused
 /// envoyage still streams frames + forwards the human's input for THAT session,
 /// but its MCP tools return text-only (no screenshot to the model — passwords
@@ -117,6 +150,12 @@ struct Channels {
     tx: broadcast::Sender<WsEnvelope>,
     input_tx: mpsc::UnboundedSender<Input>,
     input_rx: Mutex<mpsc::UnboundedReceiver<Input>>,
+    /// Wakes the pump the instant input arrives so it dispatches without waiting
+    /// out the frame tick (cuts perceived input latency from up to PUMP_TICK to
+    /// ~0). A plain std channel so the std pump thread can block on it with a
+    /// timeout; a `()` is sent per input, drained on wake.
+    wake_tx: std::sync::mpsc::Sender<()>,
+    wake_rx: Mutex<std::sync::mpsc::Receiver<()>>,
     /// Last envelope of each replay-worthy `type`. Without this a late joiner on
     /// a STATIC page (a login screen during a handoff) would see nothing —
     /// `Page.screencastFrame` only fires on visual change.
@@ -127,10 +166,13 @@ impl Channels {
     fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
         Channels {
             tx,
             input_tx,
             input_rx: Mutex::new(input_rx),
+            wake_tx,
+            wake_rx: Mutex::new(wake_rx),
             replay: Mutex::new(HashMap::new()),
         }
     }
@@ -189,7 +231,24 @@ pub fn replay_envelopes_of(session_id: &str) -> Vec<WsEnvelope> {
 
 /// A viewer sends one human input event toward `session_id`'s pump.
 pub fn push_input_to(session_id: &str, ev: Input) {
-    let _ = channels(session_id).input_tx.send(ev);
+    let ch = channels(session_id);
+    let _ = ch.input_tx.send(ev);
+    // Wake the pump so it dispatches this event now instead of on the next tick.
+    let _ = ch.wake_tx.send(());
+}
+
+/// Block the pump thread until input arrives (wakes early) or `tick` elapses
+/// (the regular frame cadence). Drains any extra wake signals so a burst of
+/// inputs collapses into one wake cycle rather than spinning.
+pub fn park_until_input_or(session_id: &str, tick: std::time::Duration) {
+    let ch = channels(session_id);
+    if let Ok(rx) = ch.wake_rx.lock() {
+        // recv_timeout returns Ok on the first wake, Err(Timeout) after `tick`.
+        let _ = rx.recv_timeout(tick);
+        while rx.try_recv().is_ok() {} // coalesce a burst
+    } else {
+        std::thread::sleep(tick);
+    }
 }
 
 /// Drain all queued human input for `session_id` (called by the pump each tick).

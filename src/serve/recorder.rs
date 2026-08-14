@@ -228,19 +228,24 @@ fn gif_speed(o: &ExportOptions) -> i32 {
     o.quality.clamp(1, 30) as i32
 }
 
-/// Per-frame delay in ms (~3/100s ≈ 33ms ≈ the 15fps capture cadence).
+/// Per-frame delay in ms. The pump feeds the recorder at most one coalesced
+/// frame per PUMP_TICK (~66ms ≈ 15fps), so the replay delay must match that
+/// cadence or the GIF plays fast (33ms ≈ 2× speed).
 fn frame_delay_ms(_o: &ExportOptions) -> u64 {
-    33
+    66
 }
 
-/// Decode a base64 PNG into an owned RGBA image.
+/// Decode a base64 screencast frame into an owned RGBA image. The screencast is
+/// JPEG (see `ensure_screencast`), but the panel/recorder path is format-agnostic
+/// — sniff the magic bytes rather than assuming PNG (the old assumption made every
+/// export fail with "frame png decode" once the screencast switched to JPEG).
 fn decode_png(png_base64: &str) -> Result<RgbaImage, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64)
         .map_err(|e| format!("frame base64 decode: {e}"))?;
-    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-        .map_err(|e| format!("frame png decode: {e}"))?;
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("frame decode: {e}"))?;
     Ok(img.to_rgba8())
 }
 

@@ -13,6 +13,10 @@
 
 import type {
   CreateSessionOptions,
+  CreateCrawlClientOptions,
+  CrawlAssetDownload,
+  CrawlJob,
+  CrawlRequest,
   DriveResult,
   DriveState,
   EventName,
@@ -42,6 +46,7 @@ export { classifyHandoff, parseHumanNeeded, HUMAN_NEEDED_JS, AX_SNAPSHOT_JS } fr
 const MCP_ROUTE = "/mcp";
 const sessionEventsRoute = (id: string) => `/sessions/${encodeURIComponent(id)}/events`;
 const sessionInputRoute = (id: string) => `/sessions/${encodeURIComponent(id)}/input`;
+const CRAWLS_ROUTE = "/crawls";
 
 let jsonRpcId = 0;
 
@@ -56,6 +61,98 @@ export function createSession(opts: CreateSessionOptions): BrowserSession {
   if (!opts.endpoint) throw new Error("createSession: `endpoint` is required");
   if (!opts.cdpUrl) throw new Error("createSession: `cdpUrl` is required");
   return new BrowserSession(opts);
+}
+
+/**
+ * Create a Workers-safe client for Envoyage's bounded public-website crawler.
+ * This client knows only Envoyage's stable contract; provider credentials and
+ * job URLs never leave the engine.
+ */
+export function createCrawlClient(opts: CreateCrawlClientOptions): CrawlClient {
+  return new CrawlClient(opts);
+}
+
+export class CrawlClient {
+  private readonly endpoint: string;
+  private readonly token?: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: CreateCrawlClientOptions) {
+    if (!opts.endpoint) throw new Error("createCrawlClient: `endpoint` is required");
+    this.endpoint = opts.endpoint.replace(/\/+$/, "");
+    this.token = opts.token;
+    const rawFetch = opts.fetch ?? globalThis.fetch;
+    if (typeof rawFetch !== "function") {
+      throw new Error("createCrawlClient: no `fetch` available — pass one in options");
+    }
+    this.fetchImpl = opts.fetch ?? rawFetch.bind(globalThis);
+  }
+
+  /** Start one bounded crawl. Exact replays return the original job. */
+  start(request: CrawlRequest, idempotencyKey: string): Promise<CrawlJob> {
+    return this.request(CRAWLS_ROUTE, {
+      method: "POST",
+      headers: this.headers({
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      }),
+      body: JSON.stringify(request),
+    });
+  }
+
+  /** Read one normalized result page. Pass the prior `nextCursor` unchanged. */
+  read(id: string, cursor?: string): Promise<CrawlJob> {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return this.request(`${CRAWLS_ROUTE}/${encodeURIComponent(id)}${query}`, {
+      method: "GET",
+      headers: this.headers({ accept: "application/json" }),
+    });
+  }
+
+  /** Cancel one exact crawl. */
+  cancel(id: string): Promise<CrawlJob> {
+    return this.request(`${CRAWLS_ROUTE}/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: this.headers({ accept: "application/json" }),
+    });
+  }
+
+  /** Download one exact raster image listed by a prior read. */
+  async downloadAsset(id: string, assetId: string): Promise<CrawlAssetDownload> {
+    const response = await this.fetchImpl(
+      `${this.endpoint}${CRAWLS_ROUTE}/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
+      { method: "GET", headers: this.headers({ accept: "image/*" }) },
+    );
+    if (!response.ok) {
+      const value = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(
+        `envoyage crawl asset: HTTP ${response.status}${value.error ? ` — ${value.error}` : ""}`,
+      );
+    }
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim();
+    const sha256 = response.headers.get("x-envoyage-content-sha256");
+    if (!contentType || !sha256) {
+      throw new Error("envoyage crawl asset: response is missing its type or content hash");
+    }
+    return {
+      contentType,
+      sha256,
+      bytes: new Uint8Array(await response.arrayBuffer()),
+    };
+  }
+
+  private async request(route: string, init: RequestInit): Promise<CrawlJob> {
+    const response = await this.fetchImpl(`${this.endpoint}${route}`, init);
+    const value = (await response.json().catch(() => ({}))) as CrawlJob & { error?: string };
+    if (!response.ok) {
+      throw new Error(`envoyage crawl: HTTP ${response.status}${value.error ? ` — ${value.error}` : ""}`);
+    }
+    return value;
+  }
+
+  private headers(extra: Record<string, string>): Record<string, string> {
+    return this.token ? { ...extra, authorization: `Bearer ${this.token}` } : extra;
+  }
 }
 
 export class BrowserSession {

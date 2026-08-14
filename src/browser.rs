@@ -29,7 +29,7 @@
 use crate::transport::{CdpTransport, PipeTransport, WsTransport};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -37,6 +37,9 @@ use std::time::{Duration, Instant};
 /// Default window geometry (CSS pixels).
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 800;
+/// Live-screencast JPEG quality (1–100). 88 keeps small UI text/borders crisp at
+/// 1:1 CSS-px capture; still ~4–5× smaller than PNG. See `ensure_screencast`.
+const SCREENCAST_QUALITY: u32 = 88;
 /// Per-CDP-command timeout. Navigation has its own longer load wait on top.
 const CDP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `navigate` waits for `Page.loadEventFired` before giving up (SPA
@@ -215,6 +218,18 @@ pub struct BrowserSession {
     /// Recent network responses (`status method url`) captured off the CDP event
     /// stream, newest last. Bounded ring.
     network: Vec<String>,
+    /// Page targets that already have the stealth new-document script installed,
+    /// so re-attaching (tab switch / follow) never stacks duplicate injections.
+    /// The UA override is idempotent and re-applied unconditionally.
+    stealth_targets: HashSet<String>,
+    /// Last synthetic cursor position (CSS px). Clicks move the pointer FROM here
+    /// TO the target along a jittered path so behavioral anti-bot sees a real
+    /// trajectory instead of a teleport-and-click.
+    cursor_pos: (f64, f64),
+    /// Tiny xorshift PRNG state for input jitter (offsets, timing, path wobble).
+    /// Seeded per-process so two sessions don't produce identical motion, but
+    /// deterministic within a run.
+    rng_state: u64,
 }
 
 /// Cap for the console/network ring buffers — enough to debug a page load
@@ -263,7 +278,12 @@ impl BrowserSession {
             // screencast + persistent-profile logins to behave like headful.
             .arg("--headless=new")
             .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
-            .arg(start_url)
+            .args(crate::stealth::LAUNCH_FLAGS)
+            // Always boot on about:blank so `attach_page` can install the stealth
+            // pre-load script BEFORE the first real page loads (a script added via
+            // Page.addScriptToEvaluateOnNewDocument only affects FUTURE documents).
+            // The requested `start_url` is navigated to below, after attach.
+            .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -321,6 +341,9 @@ impl BrowserSession {
             pending_screencast: Vec::new(),
             console: Vec::new(),
             network: Vec::new(),
+            stealth_targets: HashSet::new(),
+            cursor_pos: (WINDOW_WIDTH as f64 / 2.0, WINDOW_HEIGHT as f64 / 2.0),
+            rng_state: 0x9E37_79B9_7F4A_7C15 ^ (std::process::id() as u64).wrapping_mul(2654435761),
         };
 
         // Attach to a page target and enable Page events. If the handshake
@@ -331,6 +354,14 @@ impl BrowserSession {
                 session.close();
                 return Err(format!("CDP handshake failed over pipe: {e}"));
             }
+        }
+        // Now that the stealth pre-load script is installed (in attach_page), go
+        // to the requested page so it loads WITH the shim already in place.
+        if start_url != "about:blank"
+            && let Err(e) = session.navigate(start_url)
+        {
+            session.close();
+            return Err(format!("initial navigation to {start_url} failed: {e}"));
         }
         Ok(session)
     }
@@ -361,6 +392,9 @@ impl BrowserSession {
             pending_screencast: Vec::new(),
             console: Vec::new(),
             network: Vec::new(),
+            stealth_targets: HashSet::new(),
+            cursor_pos: (WINDOW_WIDTH as f64 / 2.0, WINDOW_HEIGHT as f64 / 2.0),
+            rng_state: 0x9E37_79B9_7F4A_7C15 ^ (std::process::id() as u64).wrapping_mul(2654435761),
         };
         match session.attach_page() {
             Ok(()) => {}
@@ -443,10 +477,50 @@ impl BrowserSession {
         let _ = self.cdp("Runtime.enable", json!({}));
         let _ = self.cdp("Log.enable", json!({}));
         let _ = self.cdp("Network.enable", json!({}));
+        // Anti-detection: strip the HeadlessChrome UA and install the stealth
+        // pre-load script. Runs here so BOTH the local (launch) and remote
+        // (connect/Cloudflare) paths get it, and every followed popup/new tab
+        // inherits it. Best-effort — a failed override must not block attach.
+        self.apply_stealth(target_id);
         // Buffers belonged to the previous target.
         self.console.clear();
         self.network.clear();
         Ok(())
+    }
+
+    /// Apply the anti-detection layer to the just-attached page session:
+    /// (1) `Network.setUserAgentOverride` with a "Headless"-stripped UA + matching
+    /// `userAgentMetadata` (idempotent, re-applied every attach), and (2) a
+    /// document-start stealth script installed once per target. Both are
+    /// transport-agnostic, so the remote Cloudflare path — where launch flags are
+    /// impossible — still gets UA + webdriver + screen normalization. See
+    /// [`crate::stealth`] for the (deliberately narrow) rationale.
+    fn apply_stealth(&mut self, target_id: &str) {
+        // UA override, derived from the live binary so it can never drift.
+        if let Ok(ver) = self.cdp("Browser.getVersion", json!({})) {
+            let product = ver.get("product").and_then(|v| v.as_str()).unwrap_or("");
+            let raw_ua = ver.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
+            if !product.is_empty() && !raw_ua.is_empty() {
+                let clean_ua = crate::stealth::clean_user_agent(raw_ua);
+                let _ = self.cdp(
+                    "Network.setUserAgentOverride",
+                    json!({
+                        "userAgent": clean_ua,
+                        // Bare list — Chrome appends the q-weights itself; passing
+                        // pre-weighted values yields a malformed "…;q=0.9;q=0.9".
+                        "acceptLanguage": "en-US,en",
+                        "userAgentMetadata": crate::stealth::user_agent_metadata(product),
+                    }),
+                );
+            }
+        }
+        // Document-start shim: once per target (persists across navigations).
+        if self.stealth_targets.insert(target_id.to_string()) {
+            let _ = self.cdp(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": crate::stealth::new_document_script() }),
+            );
+        }
     }
 
     /// Before a tool acts, make sure we're pinned to a LIVE page target. If our
@@ -553,6 +627,29 @@ impl BrowserSession {
             .map_err(|e| format!("CDP send {method}: {e}"))?;
 
         let deadline = Instant::now() + CDP_TIMEOUT;
+        self.await_reply(id, method, deadline)
+    }
+
+    /// Send a CDP command WITHOUT waiting for its reply. For high-frequency
+    /// notifications whose result we don't need (`Page.screencastFrameAck`): the
+    /// reply frame is later drained and ignored, avoiding a blocking round-trip
+    /// per frame while the pump holds the browser mutex.
+    fn cdp_fire(&mut self, method: &str, params: Value) -> Result<(), String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut msg = json!({ "id": id, "method": method, "params": params });
+        if let Some(sid) = &self.session_id {
+            msg["sessionId"] = json!(sid);
+        }
+        let bytes = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+        self.transport
+            .send(&bytes)
+            .map_err(|e| format!("CDP send {method}: {e}"))
+    }
+
+    /// Block until the reply to command `id` arrives, buffering any interleaved
+    /// events. Split out of `cdp` so both share one reply loop.
+    fn await_reply(&mut self, id: i64, method: &str, deadline: Instant) -> Result<Value, String> {
         loop {
             let frame = self
                 .transport
@@ -644,30 +741,113 @@ impl BrowserSession {
     }
 
     // ── Input primitives (CSS pixels) ────────────────────────────────
+    //
+    // Synthetic CDP input is `isTrusted === true`, so trust is never the problem
+    // — REALISM is. Behavioral anti-bot (DataDome / Kasada / PerimeterX) scores
+    // pointer trajectories, click dwell, and per-keystroke timing. These
+    // primitives emit a real approach path before a click, per-character key
+    // events (not a single paste-like `insertText`), and a burst of eased wheel
+    // ticks off dead-center. Timings are jittered via a per-process PRNG. Delays
+    // are bounded because the caller holds the browser slot mutex here.
+    // ponytail: motion is a plausible eased path + jitter, not a full biometric
+    // model — expose the ceiling, don't fake a human perfectly.
+
+    /// Next value from the internal xorshift64 PRNG.
+    fn rng(&mut self) -> u64 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng_state = x;
+        x
+    }
+
+    /// Uniform f64 in [0, 1).
+    fn rand01(&mut self) -> f64 {
+        (self.rng() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Uniform f64 in [-range, range].
+    fn jitter(&mut self, range: f64) -> f64 {
+        (self.rand01() * 2.0 - 1.0) * range
+    }
+
+    /// Glide the synthetic cursor from its last position to (x, y) along a
+    /// smooth-stepped path with mid-path lateral wobble + small per-step jitter,
+    /// dispatching `mouseMoved` events so a trajectory exists to score. Updates
+    /// `cursor_pos`. Best-effort — a failed move must not abort the click.
+    fn human_move_to(&mut self, x: f64, y: f64) {
+        let (sx, sy) = self.cursor_pos;
+        let (dx, dy) = (x - sx, y - sy);
+        let dist = (dx * dx + dy * dy).sqrt();
+        let steps = ((dist / 40.0).round() as i64).clamp(4, 18);
+        // Perpendicular unit vector, for a bowed (non-straight) path.
+        let (perp_x, perp_y) = if dist > 1.0 { (-dy / dist, dx / dist) } else { (0.0, 0.0) };
+        let bow = (dist * 0.08).min(14.0) * if self.rng() & 1 == 0 { 1.0 } else { -1.0 };
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let eased = t * t * (3.0 - 2.0 * t); // smoothstep
+            let lateral = bow * (std::f64::consts::PI * t).sin();
+            let jx = self.jitter(0.7);
+            let jy = self.jitter(0.7);
+            let mx = sx + dx * eased + perp_x * lateral + jx;
+            let my = sy + dy * eased + perp_y * lateral + jy;
+            let _ = self.cdp(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseMoved", "x": mx, "y": my, "buttons": 0 }),
+            );
+            if i < steps {
+                std::thread::sleep(Duration::from_millis(1 + (self.rng() % 3)));
+            }
+        }
+        self.cursor_pos = (x, y);
+    }
 
     /// Click at CSS-pixel (x, y) — the internal primitive behind click{ref}.
+    /// Approaches the point, lands a couple px off dead-center, and holds the
+    /// button down for a short randomized dwell before release.
     pub fn click(&mut self, x: f64, y: f64) -> Result<(), String> {
-        for kind in ["mousePressed", "mouseReleased"] {
+        let tx = x + self.jitter(2.5);
+        let ty = y + self.jitter(2.5);
+        self.human_move_to(tx, ty);
+        self.cdp(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "x": tx, "y": ty, "button": "left", "buttons": 1, "clickCount": 1 }),
+        )?;
+        std::thread::sleep(Duration::from_millis(40 + (self.rng() % 60)));
+        self.cdp(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "buttons": 0, "clickCount": 1 }),
+        )?;
+        Ok(())
+    }
+
+    /// Type `text` one character at a time via real keyDown/keyUp events (which
+    /// fire keydown/keypress/input/keyup), with jittered inter-key delays — unlike
+    /// `Input.insertText`, which commits the whole string with NO keyboard events
+    /// (a hard automation signature on login/search fields). Total time is bounded
+    /// so a long value doesn't hold the browser lock excessively.
+    pub fn type_text(&mut self, text: &str) -> Result<(), String> {
+        let chars: Vec<char> = text.chars().collect();
+        // Aim for a natural cadence but cap the total (~1s) for long strings.
+        let per_char = (900 / chars.len().max(1)).clamp(8, 55) as u64;
+        for c in chars {
+            let s = c.to_string();
             self.cdp(
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": kind,
-                    "x": x,
-                    "y": y,
-                    "button": "left",
-                    "clickCount": 1,
-                }),
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyDown", "text": s, "key": s, "unmodifiedText": s }),
             )?;
+            let dwell = 8 + (self.rng() % 25);
+            std::thread::sleep(Duration::from_millis(dwell));
+            self.cdp("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": s }))?;
+            let gap = per_char.saturating_sub(dwell).max(2) + (self.rng() % 15);
+            std::thread::sleep(Duration::from_millis(gap));
         }
         Ok(())
     }
 
-    pub fn type_text(&mut self, text: &str) -> Result<(), String> {
-        self.cdp("Input.insertText", json!({ "text": text }))?;
-        Ok(())
-    }
-
-    /// Dispatch a named key (Enter, Tab, Escape, Backspace, Arrows).
+    /// Dispatch a named key (Enter, Tab, Escape, Backspace, Arrows) with a short
+    /// randomized down→up dwell (a real key isn't pressed and released in 0ms).
     pub fn key(&mut self, key: &str) -> Result<(), String> {
         let (code, vk, text) = key_spec(key)?;
         let mut down = json!({
@@ -682,6 +862,7 @@ impl BrowserSession {
             down["type"] = json!("keyDown");
         }
         self.cdp("Input.dispatchKeyEvent", down)?;
+        std::thread::sleep(Duration::from_millis(25 + (self.rng() % 40)));
         self.cdp(
             "Input.dispatchKeyEvent",
             json!({
@@ -695,18 +876,30 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Scroll by `dy` CSS px as a burst of eased `mouseWheel` ticks from a point
+    /// off dead-center — real wheel input arrives as several decreasing deltas
+    /// with momentum, not one monolithic tick at the exact viewport center.
     pub fn scroll(&mut self, dy: f64) -> Result<(), String> {
         let (vw, vh) = self.viewport.unwrap_or((WINDOW_WIDTH, WINDOW_HEIGHT));
-        self.cdp(
-            "Input.dispatchMouseEvent",
-            json!({
-                "type": "mouseWheel",
-                "x": (vw / 2) as f64,
-                "y": (vh / 2) as f64,
-                "deltaX": 0.0,
-                "deltaY": dy,
-            }),
-        )?;
+        let ox = self.rand01();
+        let oy = self.rand01();
+        let x = vw as f64 * (0.35 + 0.3 * ox);
+        let y = vh as f64 * (0.35 + 0.3 * oy);
+        let steps = 6i64;
+        let mut sent = 0.0;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let eased = t * t * (3.0 - 2.0 * t);
+            let target = dy * eased;
+            let step_dy = target - sent;
+            sent = target;
+            let jx = self.jitter(0.5);
+            self.cdp(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseWheel", "x": x, "y": y, "deltaX": jx, "deltaY": step_dy }),
+            )?;
+            std::thread::sleep(Duration::from_millis(8 + (self.rng() % 14)));
+        }
         Ok(())
     }
 
@@ -1026,9 +1219,10 @@ impl BrowserSession {
     // ── Screencast (live mirror into the workshop panel) ─────────────
 
     /// Arm `Page.startScreencast` on the current page target if not already on.
-    /// JPEG (quality 75): ~10x faster to encode and ~5x smaller than PNG, so
-    /// the pipe sustains real 30-60fps. The webview panel sniffs the base64
-    /// magic bytes for the MIME, so JPEG frames render correctly. maxWidth/
+    /// JPEG (quality 88): far cheaper to encode/ship than PNG while staying sharp
+    /// on UI content (thin text, 1px borders) — quality 75's chroma subsampling
+    /// visibly softened those at 1:1 CSS-px capture. The webview panel sniffs the
+    /// base64 magic bytes for the MIME, so JPEG frames render correctly. maxWidth/
     /// maxHeight track the panel viewport (see `set_viewport`) so page px ==
     /// frame px and clicks map 1:1 with no letterbox. Idempotent per target.
     pub fn ensure_screencast(&mut self) -> Result<(), String> {
@@ -1040,7 +1234,7 @@ impl BrowserSession {
             "Page.startScreencast",
             json!({
                 "format": "jpeg",
-                "quality": 75,
+                "quality": SCREENCAST_QUALITY,
                 "maxWidth": w,
                 "maxHeight": h,
                 "everyNthFrame": 1,
@@ -1153,9 +1347,11 @@ impl BrowserSession {
             return Ok(None);
         }
         // Ack all frames (frees the encoder); keep only the newest to display.
+        // Fire-and-forget: the ack result is irrelevant and waiting for each one
+        // serialized 2-4 blocking round-trips per tick while holding the mutex.
         let frames = std::mem::take(&mut self.pending_screencast);
         for f in &frames {
-            let _ = self.cdp(
+            let _ = self.cdp_fire(
                 "Page.screencastFrameAck",
                 json!({ "sessionId": f.ack_session_id }),
             );

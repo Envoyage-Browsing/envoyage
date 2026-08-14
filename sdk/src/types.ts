@@ -118,6 +118,112 @@ export interface LaunchOptions {
   fetch?: typeof fetch;
 }
 
+// ─── Bounded crawling (POST/GET/DELETE /crawls) ─────────────────────────────
+
+export type CrawlDiscovery = "sitemap_and_links" | "sitemap_only" | "links_only";
+export type CrawlRenderPolicy = "auto" | "static" | "browser";
+export type CrawlAdapter = "auto" | "generic" | "shopify_collection";
+export type CrawlState = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export interface CrawlLimits {
+  maxPages?: number;
+  maxDepth?: number;
+  maxAssets?: number;
+  maxContentBytes?: number;
+  maxDurationSecs?: number;
+  maxConcurrency?: number;
+}
+
+export interface CrawlCapture {
+  sections?: boolean;
+  links?: boolean;
+  media?: boolean;
+  markdown?: boolean;
+  html?: boolean;
+}
+
+export interface CrawlRequest {
+  url: string;
+  adapter?: CrawlAdapter;
+  allowedHosts?: string[];
+  includePaths?: string[];
+  excludePaths?: string[];
+  discovery?: CrawlDiscovery;
+  render?: CrawlRenderPolicy;
+  capture?: CrawlCapture;
+  limits?: CrawlLimits;
+}
+
+export interface CrawlSection {
+  level: number;
+  heading: string;
+  text: string;
+}
+
+export interface CrawlMedia {
+  id: string;
+  position: number;
+  url: string;
+  alt?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface CrawlPage {
+  url: string;
+  canonicalUrl?: string;
+  pageType?: string;
+  productKey?: string;
+  breadcrumbs: string[];
+  title?: string;
+  description?: string;
+  statusCode?: number;
+  sections: CrawlSection[];
+  links: string[];
+  media: CrawlMedia[];
+  markdown?: string;
+  html?: string;
+  contentSha256: string;
+  truncated: boolean;
+}
+
+export interface CrawlProgress {
+  completedPages: number;
+  totalPages: number;
+  returnedPages: number;
+  returnedAssets: number;
+  returnedContentBytes: number;
+}
+
+export interface CrawlJob {
+  id: string;
+  adapter: string;
+  adapterVersion: string;
+  state: CrawlState;
+  requestFingerprint: string;
+  createdAtMs: number;
+  progress: CrawlProgress;
+  pages: CrawlPage[];
+  nextCursor?: string;
+  warnings: string[];
+  error?: string;
+}
+
+export interface CrawlAssetDownload {
+  contentType: string;
+  sha256: string;
+  bytes: Uint8Array;
+}
+
+export interface CreateCrawlClientOptions {
+  /** Base URL of the running Envoyage engine. */
+  endpoint: string;
+  /** Bearer token if the engine has ENVOYAGE_AUTH_TOKEN set. */
+  token?: string;
+  /** Optional Workers-safe fetch replacement. */
+  fetch?: typeof fetch;
+}
+
 // ─── Driving results ──────────────────────────────────────────────────────────
 
 /** One `content` item from a tool call (MCP shape). */

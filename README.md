@@ -21,6 +21,7 @@
 <p align="center">
   <a href="#quickstart"><b>Quickstart</b></a> ·
   <a href="#the-tool-surface"><b>Tool surface</b></a> ·
+  <a href="#bounded-website-crawling"><b>Crawling</b></a> ·
   <a href="#human-handoff-passwords-never-reach-the-model"><b>Human handoff</b></a> ·
   <a href="#consumers"><b>Consumers</b></a> ·
   <a href="#configuration"><b>Configuration</b></a> ·
@@ -107,6 +108,22 @@ ImmorTerm's set, so a model that knows one knows both.
 Page content (listings, tabs, console, network) is framed as **untrusted** —
 data, not instructions.
 
+## Bounded website crawling
+
+`envoyage serve` also exposes a provider-neutral crawler for public website
+inventory. Start/read/cancel are available through REST, Streamable HTTP MCP
+and `@envoyage/browser`. Page sections, links and ordered media are normalized;
+provider job IDs and pagination URLs stay private. Media bytes are downloaded
+through a job-scoped, host-checked and byte-limited route.
+
+Public Shopify collection URLs are recognized by the built-in verified
+adapter. It preserves every Product boundary, handle, canonical URL, gallery
+position and original image dimensions without requiring Firecrawl. A generic
+provider remains available for other sites and rendered page context.
+
+See [the crawling guide](docs/crawling.md) for configuration, examples, limits
+and the security model.
+
 ### Human handoff (passwords never reach the model)
 
 When envoyage detects a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in screen, or
@@ -181,6 +198,9 @@ cursor:
 | `ENVOYAGE_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
 | `ENVOYAGE_MASK_ALL_INPUTS` | unset | `1`/`true` → mask **every** input/textarea/select value in the `read_page`/`find` AX listing (value withheld, `masked:true`). `<input type="password">` is always masked regardless. |
 | `ENVOYAGE_MASK_SELECTOR` | unset | CSS selector; any field matching it (or a descendant of a match) has its AX value masked. A bad selector is ignored, never throws. Also always-honored: mark a field or ancestor with the `[data-envoyage-mask]` attribute to mask it. |
+| `ENVOYAGE_CRAWL_PROVIDER_URL` | unset | Base URL of the configured Firecrawl v2 engine. Crawling stays unavailable when unset. |
+| `ENVOYAGE_CRAWL_PROVIDER_TOKEN` | unset | Optional server-only crawl provider bearer token. |
+| `ENVOYAGE_CRAWL_STATE_DIR` | `${ENVOYAGE_HOME}/crawls` | Durable crawl receipts, media manifests and bounded cached raster bytes. |
 | `ENVOYAGE_GITHUB_REPO` | `Envoyage-Browsing/envoyage` | Release source for the npm wrapper. |
 
 Only one real browser drives the shared profile at a time — a cross-process
@@ -196,6 +216,7 @@ Solid:
 - Human-handoff detection (Cloudflare/CAPTCHA/OAuth/password) + frame
   suppression to the model while paused.
 - Multi-tab / popup follow, console + network capture, file upload, wait-for.
+- Provider-neutral bounded crawling with REST/MCP/SDK control and exact media downloads.
 - One-browser-per-user ownership lock.
 
 Not yet:
