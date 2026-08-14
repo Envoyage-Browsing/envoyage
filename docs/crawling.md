@@ -4,6 +4,12 @@ Envoyage can inventory a public website, return normalized page structure and
 media, and download only the raster images found by that crawl. Consumers use
 one Envoyage contract even when the configured crawl engine changes.
 
+For a public Shopify collection, `adapter: "auto"` uses the built-in verified
+collection adapter. It returns one Product page per Product with its stable
+handle, canonical URL and complete ordered image gallery. It snapshots the
+feed before returning, so a later website change cannot alter an existing job.
+Other sites use the configured generic crawl provider.
+
 Use crawling for a bounded site inventory. Use the existing `browser_*` tools
 when an agent must understand one rendered page in context or interact with it.
 
@@ -29,7 +35,8 @@ curl -sS -X POST "$ENVOYAGE_URL/crawls" \
   -H "Content-Type: application/json" \
   --data '{
     "url":"https://shop.example/collections/summer",
-    "allowedHosts":["shop.example","cdn.shop.example"],
+    "adapter":"auto",
+    "allowedHosts":["shop.example"],
     "includePaths":["products/.*"],
     "render":"auto",
     "capture":{"sections":true,"links":true,"media":true},
@@ -60,7 +67,8 @@ const crawl = createCrawlClient({
 let job = await crawl.start(
   {
     url: "https://shop.example/collections/summer",
-    allowedHosts: ["shop.example", "cdn.shop.example"],
+    adapter: "auto",
+    allowedHosts: ["shop.example"],
     capture: { sections: true, links: true, media: true },
     limits: { maxPages: 250, maxAssets: 2000 },
   },
@@ -106,6 +114,10 @@ carry large binary files.
 - Envoyage respects provider robots handling and does not expose a control that
   bypasses it. Consumers remain responsible for permission, copyright and their
   own retention rules.
+- The verified Shopify adapter discovers the first-party CDN hosts from the
+  collection snapshot, checks their public DNS and permits only the exact image
+  URLs listed in that job. Callers do not need to guess or approve a broad CDN
+  host, and Envoyage never crawls the CDN as pages.
 
 Firecrawl is an optional engine behind this contract. It is not part of the
 Envoyage public API, and its job IDs, cursors, response shape and credentials do

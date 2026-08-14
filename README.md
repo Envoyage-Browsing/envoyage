@@ -116,6 +116,11 @@ and `@envoyage/browser`. Page sections, links and ordered media are normalized;
 provider job IDs and pagination URLs stay private. Media bytes are downloaded
 through a job-scoped, host-checked and byte-limited route.
 
+Public Shopify collection URLs are recognized by the built-in verified
+adapter. It preserves every Product boundary, handle, canonical URL, gallery
+position and original image dimensions without requiring Firecrawl. A generic
+provider remains available for other sites and rendered page context.
+
 See [the crawling guide](docs/crawling.md) for configuration, examples, limits
 and the security model.
 

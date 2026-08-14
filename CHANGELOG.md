@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A verified Shopify collection adapter behind `adapter: auto` that snapshots
+  the complete Product inventory, preserves ordered galleries and dimensions,
+  and permits only the exact public CDN images recorded by that crawl.
 - **Bounded website crawling** behind one Envoyage contract: durable exact
   idempotency, start/read/cancel over REST and MCP, normalized page sections,
   links and ordered media, opaque pagination, public-host and limit checks, and

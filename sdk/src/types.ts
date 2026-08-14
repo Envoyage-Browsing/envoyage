@@ -122,6 +122,7 @@ export interface LaunchOptions {
 
 export type CrawlDiscovery = "sitemap_and_links" | "sitemap_only" | "links_only";
 export type CrawlRenderPolicy = "auto" | "static" | "browser";
+export type CrawlAdapter = "auto" | "generic" | "shopify_collection";
 export type CrawlState = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface CrawlLimits {
@@ -143,6 +144,7 @@ export interface CrawlCapture {
 
 export interface CrawlRequest {
   url: string;
+  adapter?: CrawlAdapter;
   allowedHosts?: string[];
   includePaths?: string[];
   excludePaths?: string[];
@@ -163,10 +165,16 @@ export interface CrawlMedia {
   position: number;
   url: string;
   alt?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface CrawlPage {
   url: string;
+  canonicalUrl?: string;
+  pageType?: string;
+  productKey?: string;
+  breadcrumbs: string[];
   title?: string;
   description?: string;
   statusCode?: number;
@@ -189,6 +197,8 @@ export interface CrawlProgress {
 
 export interface CrawlJob {
   id: string;
+  adapter: string;
+  adapterVersion: string;
   state: CrawlState;
   requestFingerprint: string;
   createdAtMs: number;

@@ -32,6 +32,14 @@ const MAX_CONCURRENCY: u16 = 20;
 const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_ASSET_REDIRECTS: usize = 5;
 
+fn generic_adapter_name() -> String {
+    "generic".to_string()
+}
+
+fn crawl_adapter_version() -> String {
+    "envoyage-crawl-v2".to_string()
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CrawlDiscovery {
@@ -48,6 +56,15 @@ pub enum CrawlRenderPolicy {
     Auto,
     Static,
     Browser,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CrawlAdapter {
+    #[default]
+    Auto,
+    Generic,
+    ShopifyCollection,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -135,6 +152,8 @@ fn yes() -> bool {
 pub struct CrawlRequest {
     pub url: String,
     #[serde(default)]
+    pub adapter: CrawlAdapter,
+    #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
     pub include_paths: Vec<String>,
@@ -186,12 +205,24 @@ pub struct CrawlMedia {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CrawlPage {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_key: Option<String>,
+    #[serde(default)]
+    pub breadcrumbs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,6 +247,8 @@ pub struct CrawlPage {
 #[serde(rename_all = "camelCase")]
 pub struct CrawlJob {
     pub id: String,
+    pub adapter: String,
+    pub adapter_version: String,
     pub state: CrawlState,
     pub request_fingerprint: String,
     pub created_at_ms: u64,
@@ -241,6 +274,12 @@ pub struct CrawlAssetDownload {
 struct Receipt {
     id: String,
     provider_id: String,
+    #[serde(default = "generic_adapter_name")]
+    adapter: String,
+    #[serde(default = "crawl_adapter_version")]
+    adapter_version: String,
+    #[serde(default)]
+    asset_hosts: Vec<String>,
     request_fingerprint: String,
     request: CrawlRequest,
     created_at_ms: u64,
@@ -266,6 +305,9 @@ struct CrawlAuditEvent<'a> {
 #[derive(Clone, Debug)]
 struct ProviderStart {
     id: String,
+    adapter: String,
+    adapter_version: String,
+    asset_hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -409,7 +451,12 @@ impl CrawlProvider for FirecrawlProvider {
             .and_then(Value::as_str)
             .ok_or("crawl provider returned no job id")?;
         validate_job_id(id)?;
-        Ok(ProviderStart { id: id.to_string() })
+        Ok(ProviderStart {
+            id: id.to_string(),
+            adapter: "generic".to_string(),
+            adapter_version: crawl_adapter_version(),
+            asset_hosts: request.allowed_hosts.clone(),
+        })
     }
 
     fn read(&self, provider_id: &str, next: Option<&str>) -> Result<ProviderStatus, String> {
@@ -497,6 +544,352 @@ impl CrawlProvider for FirecrawlProvider {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ShopifyFeed {
+    #[serde(default)]
+    products: Vec<ShopifyProduct>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ShopifyProduct {
+    id: u64,
+    title: String,
+    handle: String,
+    #[serde(default)]
+    body_html: String,
+    #[serde(default)]
+    images: Vec<ShopifyImage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ShopifyImage {
+    #[serde(default)]
+    position: u32,
+    src: String,
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
+    alt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ShopifySnapshot {
+    documents: Vec<Value>,
+    asset_hosts: Vec<String>,
+    warning: Option<String>,
+}
+
+struct ShopifyCollectionProvider {
+    state_dir: PathBuf,
+    client: Client,
+    resolve_dns: bool,
+}
+
+impl ShopifyCollectionProvider {
+    fn new(state_dir: PathBuf, resolve_dns: bool) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent("Envoyage/0.2 (+https://github.com/Envoyage-Browsing/envoyage)")
+            .build()
+            .map_err(|error| format!("build Shopify collection client: {error}"))?;
+        Ok(Self {
+            state_dir,
+            client,
+            resolve_dns,
+        })
+    }
+
+    fn feed_url(request: &CrawlRequest, page: u32) -> Result<Url, String> {
+        let mut url = Url::parse(&request.url).map_err(|error| error.to_string())?;
+        let segments = url
+            .path_segments()
+            .ok_or("Shopify collection URL has no path")?
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let Some(collection_index) = segments
+            .iter()
+            .position(|segment| *segment == "collections")
+        else {
+            return Err("Shopify adapter needs a /collections/{handle} URL".to_string());
+        };
+        if segments.get(collection_index + 1).is_none() {
+            return Err("Shopify adapter needs a collection handle".to_string());
+        }
+        let prefix = segments[..=collection_index + 1].join("/");
+        url.set_path(&format!("/{prefix}/products.json"));
+        url.set_query(Some(&format!("limit=250&page={page}")));
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    fn snapshot_path(&self, id: &str) -> PathBuf {
+        self.state_dir.join(format!("shopify-{id}.json"))
+    }
+
+    fn supports(request: &CrawlRequest) -> bool {
+        Self::feed_url(request, 1).is_ok()
+    }
+}
+
+impl CrawlProvider for ShopifyCollectionProvider {
+    fn start(
+        &self,
+        request: &CrawlRequest,
+        idempotency_key: &str,
+    ) -> Result<ProviderStart, String> {
+        let provider_id = format!(
+            "shopify_{}",
+            &sha256_text(&format!("{}\0{idempotency_key}", request.url))[..32]
+        );
+        let path = self.snapshot_path(&provider_id);
+        if path.exists() {
+            let snapshot: ShopifySnapshot = read_json(&path, "Shopify collection snapshot")?;
+            return Ok(ProviderStart {
+                id: provider_id,
+                adapter: "shopify_collection".to_string(),
+                adapter_version: crawl_adapter_version(),
+                asset_hosts: snapshot.asset_hosts,
+            });
+        }
+
+        let seed = Url::parse(&request.url).map_err(|error| error.to_string())?;
+        let seed_host = seed
+            .host_str()
+            .ok_or("Shopify collection URL has no host")?;
+        let mut products = Vec::new();
+        let mut page = 1_u32;
+        let mut exceeded_page_limit = false;
+        loop {
+            let feed_url = Self::feed_url(request, page)?;
+            if self.resolve_dns {
+                ensure_public_dns(seed_host)?;
+            }
+            let response = self
+                .client
+                .get(feed_url)
+                .send()
+                .map_err(|error| format!("read Shopify collection: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Shopify collection feed returned HTTP {}",
+                    response.status().as_u16()
+                ));
+            }
+            let feed: ShopifyFeed = response
+                .json()
+                .map_err(|error| format!("decode Shopify collection feed: {error}"))?;
+            if feed.products.is_empty() {
+                break;
+            }
+            for product in feed.products {
+                if products.len() >= request.limits.max_pages as usize {
+                    exceeded_page_limit = true;
+                    break;
+                }
+                products.push(product);
+            }
+            if exceeded_page_limit || products.len() % 250 != 0 {
+                break;
+            }
+            page = page.saturating_add(1);
+        }
+        if products.is_empty() {
+            return Err("Shopify collection contained no Products".to_string());
+        }
+
+        let image_count = products
+            .iter()
+            .map(|product| product.images.len())
+            .sum::<usize>();
+        if image_count > request.limits.max_assets as usize {
+            return Err(format!(
+                "Shopify collection has {image_count} images, above maxAssets {}",
+                request.limits.max_assets
+            ));
+        }
+
+        let mut asset_hosts = BTreeSet::new();
+        let mut documents = Vec::with_capacity(products.len());
+        for product in products {
+            let product_url = seed
+                .join(&format!("/products/{}", product.handle))
+                .map_err(|error| format!("build Shopify Product URL: {error}"))?;
+            let media = product
+                .images
+                .iter()
+                .map(|image| {
+                    let image_url = Url::parse(&image.src)
+                        .map_err(|error| format!("invalid Shopify image URL: {error}"))?;
+                    if !matches!(image_url.scheme(), "http" | "https") {
+                        return Err("Shopify image URL must use http or https".to_string());
+                    }
+                    let host = image_url
+                        .host_str()
+                        .ok_or("Shopify image URL has no host")?
+                        .to_ascii_lowercase();
+                    if self.resolve_dns {
+                        ensure_public_dns(&host)?;
+                    }
+                    asset_hosts.insert(host);
+                    Ok(json!({
+                        "url": image_url.to_string(),
+                        "position": image.position.saturating_sub(1),
+                        "alt": image.alt,
+                        "width": image.width,
+                        "height": image.height,
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let canonical = product_url.to_string();
+            let product_key = if product.handle.is_empty() {
+                product.id.to_string()
+            } else {
+                product.handle.clone()
+            };
+            let content_sha256 = sha256_json(&product)?;
+            documents.push(json!({
+                "markdown": product.body_html,
+                "breadcrumbs": ["Collection", product.title],
+                "envoyageMedia": media,
+                "metadata": {
+                    "sourceURL": canonical,
+                    "canonicalUrl": canonical,
+                    "title": product.title,
+                    "statusCode": 200,
+                    "pageType": "product",
+                    "productKey": product_key,
+                    "contentSha256": content_sha256,
+                }
+            }));
+        }
+        let snapshot = ShopifySnapshot {
+            documents,
+            asset_hosts: asset_hosts.into_iter().collect(),
+            warning: exceeded_page_limit.then(|| {
+                format!(
+                    "Shopify collection exceeded maxPages {}; remaining Products were not imported",
+                    request.limits.max_pages
+                )
+            }),
+        };
+        write_json(&path, &snapshot, "Shopify collection snapshot")?;
+        Ok(ProviderStart {
+            id: provider_id,
+            adapter: "shopify_collection".to_string(),
+            adapter_version: crawl_adapter_version(),
+            asset_hosts: snapshot.asset_hosts,
+        })
+    }
+
+    fn read(&self, provider_id: &str, next: Option<&str>) -> Result<ProviderStatus, String> {
+        let snapshot: ShopifySnapshot = read_json(
+            &self.snapshot_path(provider_id),
+            "Shopify collection snapshot",
+        )?;
+        let offset = match next {
+            None => 0,
+            Some(next) => next
+                .strip_prefix(&format!("shopify:{provider_id}:"))
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or("invalid Shopify cursor")?,
+        };
+        let end = offset.saturating_add(50).min(snapshot.documents.len());
+        let documents = snapshot.documents[offset..end].to_vec();
+        Ok(ProviderStatus {
+            state: CrawlState::Completed,
+            completed: snapshot.documents.len() as u32,
+            total: snapshot.documents.len() as u32,
+            documents,
+            next: (end < snapshot.documents.len()).then(|| format!("shopify:{provider_id}:{end}")),
+            warning: snapshot.warning,
+            error: None,
+        })
+    }
+
+    fn cancel(&self, _provider_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn validate_cursor(&self, provider_id: &str, next: &str) -> bool {
+        next.strip_prefix(&format!("shopify:{provider_id}:"))
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some()
+    }
+}
+
+struct CrawlProviderRouter {
+    generic: Option<FirecrawlProvider>,
+    shopify: ShopifyCollectionProvider,
+}
+
+impl CrawlProviderRouter {
+    fn from_env(state_dir: PathBuf, resolve_dns: bool) -> Result<Self, String> {
+        Ok(Self {
+            generic: FirecrawlProvider::from_env().ok(),
+            shopify: ShopifyCollectionProvider::new(state_dir, resolve_dns)?,
+        })
+    }
+}
+
+impl CrawlProvider for CrawlProviderRouter {
+    fn start(
+        &self,
+        request: &CrawlRequest,
+        idempotency_key: &str,
+    ) -> Result<ProviderStart, String> {
+        let try_shopify = matches!(
+            request.adapter,
+            CrawlAdapter::Auto | CrawlAdapter::ShopifyCollection
+        ) && ShopifyCollectionProvider::supports(request);
+        if try_shopify {
+            match self.shopify.start(request, idempotency_key) {
+                Ok(started) => return Ok(started),
+                Err(error) if request.adapter == CrawlAdapter::ShopifyCollection => {
+                    return Err(error);
+                }
+                Err(_) => {}
+            }
+        }
+        let generic = self.generic.as_ref().ok_or(
+            "crawling is not configured: this URL has no verified site adapter and ENVOYAGE_CRAWL_PROVIDER_URL is not set",
+        )?;
+        generic.start(request, idempotency_key)
+    }
+
+    fn read(&self, provider_id: &str, next: Option<&str>) -> Result<ProviderStatus, String> {
+        if provider_id.starts_with("shopify_") {
+            self.shopify.read(provider_id, next)
+        } else {
+            self.generic
+                .as_ref()
+                .ok_or("generic crawl provider is not configured")?
+                .read(provider_id, next)
+        }
+    }
+
+    fn cancel(&self, provider_id: &str) -> Result<(), String> {
+        if provider_id.starts_with("shopify_") {
+            self.shopify.cancel(provider_id)
+        } else {
+            self.generic
+                .as_ref()
+                .ok_or("generic crawl provider is not configured")?
+                .cancel(provider_id)
+        }
+    }
+
+    fn validate_cursor(&self, provider_id: &str, next: &str) -> bool {
+        if provider_id.starts_with("shopify_") {
+            self.shopify.validate_cursor(provider_id, next)
+        } else {
+            self.generic
+                .as_ref()
+                .is_some_and(|provider| provider.validate_cursor(provider_id, next))
+        }
+    }
+}
+
 pub struct CrawlService {
     provider: Arc<dyn CrawlProvider>,
     state_dir: PathBuf,
@@ -506,10 +899,10 @@ pub struct CrawlService {
 
 impl CrawlService {
     fn from_env() -> Result<Self, String> {
-        let provider = Arc::new(FirecrawlProvider::from_env()?);
         let state_dir = std::env::var_os("ENVOYAGE_CRAWL_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| envoyage_home().join("crawls"));
+        let provider = Arc::new(CrawlProviderRouter::from_env(state_dir.clone(), true)?);
         Self::new(provider, state_dir, true)
     }
 
@@ -551,6 +944,9 @@ impl CrawlService {
         let receipt = Receipt {
             id,
             provider_id: provider.id,
+            adapter: provider.adapter,
+            adapter_version: provider.adapter_version,
+            asset_hosts: provider.asset_hosts,
             request_fingerprint,
             request,
             created_at_ms,
@@ -632,12 +1028,7 @@ impl CrawlService {
         let raw_url = manifest
             .get(asset_id)
             .ok_or("crawl asset not found; read the result page containing it first")?;
-        let allowed = receipt
-            .request
-            .allowed_hosts
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let allowed = receipt.asset_hosts.iter().cloned().collect::<BTreeSet<_>>();
         let max_bytes = receipt
             .request
             .limits
@@ -983,6 +1374,7 @@ fn normalize_job(receipt: &Receipt, status: ProviderStatus) -> Result<CrawlJob, 
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let allowed_assets = receipt.asset_hosts.iter().cloned().collect::<BTreeSet<_>>();
     let mut pages = Vec::new();
     let mut warnings = status.warning.into_iter().collect::<Vec<_>>();
     let mut returned_bytes = 0_u64;
@@ -996,6 +1388,7 @@ fn normalize_job(receipt: &Receipt, status: ProviderStatus) -> Result<CrawlJob, 
             doc,
             &receipt.request,
             &allowed,
+            &allowed_assets,
             &mut returned_bytes,
             &mut returned_assets,
             &mut warnings,
@@ -1008,6 +1401,8 @@ fn normalize_job(receipt: &Receipt, status: ProviderStatus) -> Result<CrawlJob, 
     let next_cursor = status.next.map(|next| encode_cursor(&next));
     Ok(CrawlJob {
         id: receipt.id.clone(),
+        adapter: receipt.adapter.clone(),
+        adapter_version: receipt.adapter_version.clone(),
         state: status.state,
         request_fingerprint: receipt.request_fingerprint.clone(),
         created_at_ms: receipt.created_at_ms,
@@ -1029,6 +1424,7 @@ fn normalize_document(
     doc: Value,
     request: &CrawlRequest,
     allowed: &BTreeSet<String>,
+    allowed_assets: &BTreeSet<String>,
     returned_bytes: &mut u64,
     returned_assets: &mut u32,
     warnings: &mut Vec<String>,
@@ -1062,7 +1458,9 @@ fn normalize_document(
     } else {
         markdown_raw
     };
-    let content_sha256 = sha256_text(digest_source);
+    let content_sha256 = metadata_string(meta, "contentSha256")
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or_else(|| sha256_text(digest_source));
     let mut truncated = false;
     let markdown = if request.capture.markdown {
         take_content(
@@ -1104,25 +1502,38 @@ fn normalize_document(
     };
     let mut media = Vec::new();
     if request.capture.media {
-        for (position, raw) in string_array(doc.get("images")).into_iter().enumerate() {
+        for (position, raw) in normalized_media(doc.get("envoyageMedia"), doc.get("images"))
+            .into_iter()
+            .enumerate()
+        {
             if *returned_assets >= request.limits.max_assets {
                 truncated = true;
                 break;
             }
-            let Some(url) = allowed_output_url(&raw, allowed) else {
+            let Some(url) = allowed_output_url(&raw.url, allowed_assets) else {
                 continue;
             };
             media.push(CrawlMedia {
                 id: sha256_text(&url),
-                position: position as u32,
+                position: raw.position.unwrap_or(position as u32),
                 url,
-                alt: None,
+                alt: raw.alt,
+                width: raw.width,
+                height: raw.height,
             });
             *returned_assets += 1;
         }
     }
     Ok(Some(CrawlPage {
         url: url.to_string(),
+        canonical_url: metadata_string(meta, "canonicalUrl")
+            .and_then(|raw| allowed_output_url(&raw, allowed)),
+        page_type: metadata_string(meta, "pageType"),
+        product_key: metadata_string(meta, "productKey"),
+        breadcrumbs: string_array(doc.get("breadcrumbs"))
+            .into_iter()
+            .take(20)
+            .collect(),
         title: metadata_string(meta, "title"),
         description: metadata_string(meta, "description"),
         status_code: meta
@@ -1159,6 +1570,51 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_string)
+        .collect()
+}
+
+struct NormalizedMedia {
+    url: String,
+    position: Option<u32>,
+    alt: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn normalized_media(structured: Option<&Value>, plain: Option<&Value>) -> Vec<NormalizedMedia> {
+    if let Some(rows) = structured.and_then(Value::as_array) {
+        return rows
+            .iter()
+            .filter_map(|row| {
+                let url = row.get("url")?.as_str()?.to_string();
+                Some(NormalizedMedia {
+                    url,
+                    position: row
+                        .get("position")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok()),
+                    alt: row.get("alt").and_then(Value::as_str).map(str::to_string),
+                    width: row
+                        .get("width")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok()),
+                    height: row
+                        .get("height")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok()),
+                })
+            })
+            .collect();
+    }
+    string_array(plain)
+        .into_iter()
+        .map(|url| NormalizedMedia {
+            url,
+            position: None,
+            alt: None,
+            width: None,
+            height: None,
+        })
         .collect()
 }
 
@@ -1254,6 +1710,8 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 fn empty_job(receipt: &Receipt, state: CrawlState) -> CrawlJob {
     CrawlJob {
         id: receipt.id.clone(),
+        adapter: receipt.adapter.clone(),
+        adapter_version: receipt.adapter_version.clone(),
         state,
         request_fingerprint: receipt.request_fingerprint.clone(),
         created_at_ms: receipt.created_at_ms,
@@ -1562,6 +2020,9 @@ mod tests {
             *self.request.lock().unwrap() = Some(request.clone());
             Ok(ProviderStart {
                 id: "crawl-123".to_string(),
+                adapter: "generic".to_string(),
+                adapter_version: crawl_adapter_version(),
+                asset_hosts: request.allowed_hosts.clone(),
             })
         }
 
@@ -1599,6 +2060,7 @@ mod tests {
     fn request() -> CrawlRequest {
         CrawlRequest {
             url: "https://shop.example/collections/summer".to_string(),
+            adapter: CrawlAdapter::Generic,
             allowed_hosts: vec!["shop.example".to_string()],
             include_paths: vec!["products/.*".to_string()],
             exclude_paths: vec![],
@@ -1687,6 +2149,53 @@ mod tests {
     }
 
     #[test]
+    fn verified_product_pages_keep_gallery_identity_order_and_dimensions() {
+        let request = CrawlRequest {
+            adapter: CrawlAdapter::ShopifyCollection,
+            ..request()
+        };
+        let mut bytes = 0;
+        let mut assets = 0;
+        let mut warnings = Vec::new();
+        let page = normalize_document(
+            json!({
+                "markdown": "Soft cotton set",
+                "breadcrumbs": ["Summer", "Black cotton set"],
+                "envoyageMedia": [{
+                    "url": "https://cdn.shop.example/black-front.jpg",
+                    "position": 3,
+                    "alt": "front",
+                    "width": 2001,
+                    "height": 3000
+                }],
+                "metadata": {
+                    "sourceURL": "https://shop.example/products/black-set",
+                    "canonicalUrl": "https://shop.example/products/black-set",
+                    "title": "Black cotton set",
+                    "pageType": "product",
+                    "productKey": "black-set",
+                    "contentSha256": "a".repeat(64)
+                }
+            }),
+            &request,
+            &BTreeSet::from(["shop.example".to_string()]),
+            &BTreeSet::from(["cdn.shop.example".to_string()]),
+            &mut bytes,
+            &mut assets,
+            &mut warnings,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.page_type.as_deref(), Some("product"));
+        assert_eq!(page.product_key.as_deref(), Some("black-set"));
+        assert_eq!(page.breadcrumbs, vec!["Summer", "Black cotton set"]);
+        assert_eq!(page.media[0].position, 3);
+        assert_eq!(page.media[0].width, Some(2001));
+        assert_eq!(page.media[0].height, Some(3000));
+        assert_eq!(page.content_sha256, "a".repeat(64));
+    }
+
+    #[test]
     fn empty_arrays_remain_present_in_the_wire_contract() {
         let provider = Arc::new(MockProvider::new());
         let dir = test_dir("wire-arrays");
@@ -1737,6 +2246,7 @@ mod tests {
         let page = normalize_document(
             json!({"markdown":"1234567890", "metadata":{"sourceURL":"https://shop.example/x"}}),
             &request,
+            &BTreeSet::from(["shop.example".to_string()]),
             &BTreeSet::from(["shop.example".to_string()]),
             &mut bytes,
             &mut assets,

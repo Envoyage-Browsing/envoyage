@@ -423,6 +423,10 @@ components:
       required: [url]
       properties:
         url: { type: string, format: uri, maxLength: 2048 }
+        adapter:
+          type: string
+          enum: [auto, generic, shopify_collection]
+          default: auto
         allowedHosts:
           type: array
           maxItems: 20
@@ -468,9 +472,11 @@ components:
         maxConcurrency: { type: integer, minimum: 1, maximum: 20, default: 5 }
     CrawlJob:
       type: object
-      required: [id, state, requestFingerprint, createdAtMs, progress, pages, warnings]
+      required: [id, adapter, adapterVersion, state, requestFingerprint, createdAtMs, progress, pages, warnings]
       properties:
         id: { type: string, pattern: '^crawl-[a-f0-9]{32}$' }
+        adapter: { type: string }
+        adapterVersion: { type: string }
         state: { type: string, enum: [queued, running, completed, failed, cancelled] }
         requestFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
         createdAtMs: { type: integer, minimum: 0 }
@@ -494,9 +500,15 @@ components:
         returnedContentBytes: { type: integer, minimum: 0 }
     CrawlPage:
       type: object
-      required: [url, sections, links, media, contentSha256, truncated]
+      required: [url, breadcrumbs, sections, links, media, contentSha256, truncated]
       properties:
         url: { type: string, format: uri }
+        canonicalUrl: { type: string, format: uri }
+        pageType: { type: string }
+        productKey: { type: string }
+        breadcrumbs:
+          type: array
+          items: { type: string }
         title: { type: string }
         description: { type: string }
         statusCode: { type: integer, minimum: 100, maximum: 599 }
@@ -528,6 +540,8 @@ components:
         position: { type: integer, minimum: 0 }
         url: { type: string, format: uri }
         alt: { type: string }
+        width: { type: integer, minimum: 1 }
+        height: { type: integer, minimum: 1 }
     ErrorBody:
       type: object
       properties:
