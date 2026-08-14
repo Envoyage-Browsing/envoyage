@@ -1,0 +1,38 @@
+meta {
+  name: Crawl — start
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/crawls
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+headers {
+  Content-Type: application/json
+  Idempotency-Key: {{crawlIdempotencyKey}}
+}
+
+body:json {
+  {
+    "url": "https://example.com/",
+    "allowedHosts": ["example.com"],
+    "render": "auto",
+    "capture": {
+      "sections": true,
+      "links": true,
+      "media": true
+    },
+    "limits": {
+      "maxPages": 20,
+      "maxAssets": 100,
+      "maxContentBytes": 10485760
+    }
+  }
+}

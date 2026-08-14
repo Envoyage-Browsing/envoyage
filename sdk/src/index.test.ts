@@ -9,6 +9,7 @@ import {
   parseListing,
   parseTabs,
   classifyHandoff,
+  createCrawlClient,
   createSession,
 } from "./index.js";
 import { readSse } from "./sse.js";
@@ -268,6 +269,112 @@ test("driving marshals a JSON-RPC tools/call with session header + bearer", asyn
   assert.equal(body.method, "tools/call");
   assert.equal(body.params.name, "browser_open");
   assert.deepEqual(body.params.arguments, { url: "https://example.com" });
+});
+
+test("crawl client uses the bounded REST surface and exact idempotency key", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const fakeFetch = (async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return new Response(
+      JSON.stringify({
+        id: "crawl-123",
+        state: "queued",
+        requestFingerprint: "a".repeat(64),
+        createdAtMs: 1,
+        progress: {
+          completedPages: 0,
+          totalPages: 0,
+          returnedPages: 0,
+          returnedAssets: 0,
+          returnedContentBytes: 0,
+        },
+        pages: [],
+        warnings: [],
+      }),
+      { status: 202, headers: { "content-type": "application/json" } },
+    );
+  }) as unknown as typeof fetch;
+
+  const client = createCrawlClient({
+    endpoint: "https://engine.example.com/",
+    token: "secret",
+    fetch: fakeFetch,
+  });
+  const job = await client.start(
+    {
+      url: "https://shop.example/collections/summer",
+      allowedHosts: ["shop.example"],
+      limits: { maxPages: 250, maxAssets: 2000 },
+    },
+    "factory-bonita-summer-2026",
+  );
+  assert.equal(job.id, "crawl-123");
+  assert.equal(calls[0].url, "https://engine.example.com/crawls");
+  const headers = calls[0].init.headers as Record<string, string>;
+  assert.equal(headers.authorization, "Bearer secret");
+  assert.equal(headers["idempotency-key"], "factory-bonita-summer-2026");
+  assert.deepEqual(JSON.parse(calls[0].init.body as string), {
+    url: "https://shop.example/collections/summer",
+    allowedHosts: ["shop.example"],
+    limits: { maxPages: 250, maxAssets: 2000 },
+  });
+});
+
+test("crawl pagination remains opaque and cancellation is job-scoped", async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  const fakeFetch = (async (url: string, init: RequestInit) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    return new Response(
+      JSON.stringify({
+        id: "crawl-123",
+        state: init.method === "DELETE" ? "cancelled" : "running",
+        requestFingerprint: "a".repeat(64),
+        createdAtMs: 1,
+        progress: {
+          completedPages: 1,
+          totalPages: 2,
+          returnedPages: 0,
+          returnedAssets: 0,
+          returnedContentBytes: 0,
+        },
+        pages: [],
+        warnings: [],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as unknown as typeof fetch;
+  const client = createCrawlClient({ endpoint: "https://engine.example.com", fetch: fakeFetch });
+  await client.read("crawl-123", "opaque+/=");
+  await client.cancel("crawl-123");
+  assert.deepEqual(calls, [
+    {
+      url: "https://engine.example.com/crawls/crawl-123?cursor=opaque%2B%2F%3D",
+      method: "GET",
+    },
+    { url: "https://engine.example.com/crawls/crawl-123", method: "DELETE" },
+  ]);
+});
+
+test("crawl asset download stays job-scoped and returns exact bytes", async () => {
+  const calls: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    calls.push(url);
+    return new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: {
+        "content-type": "image/webp",
+        "x-envoyage-content-sha256": "a".repeat(64),
+      },
+    });
+  }) as unknown as typeof fetch;
+  const client = createCrawlClient({ endpoint: "https://engine.example.com", fetch: fakeFetch });
+  const asset = await client.downloadAsset("crawl-one", "b".repeat(64));
+  assert.deepEqual(calls, [
+    `https://engine.example.com/crawls/crawl-one/assets/${"b".repeat(64)}`,
+  ]);
+  assert.equal(asset.contentType, "image/webp");
+  assert.equal(asset.sha256, "a".repeat(64));
+  assert.deepEqual([...asset.bytes], [1, 2, 3]);
 });
 
 test("sendInput POSTs the input envelope to the per-session /sessions/:id/input", async () => {

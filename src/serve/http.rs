@@ -28,8 +28,10 @@
 
 use crate::protocol::Input;
 use crate::serve::{mcp, state};
+use crate::{crawl, crawl::CrawlRequest};
 use axum::{
     Router,
+    body::Body,
     extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{Next, from_fn},
@@ -64,6 +66,12 @@ pub async fn run(port: u16, auth_token: Option<String>) -> std::io::Result<()> {
         )
         .route("/sessions/{id}/events", get(sse_events_handler))
         .route("/sessions/{id}/input", post(input_handler))
+        .route("/crawls", post(crawl_start_handler))
+        .route(
+            "/crawls/{id}",
+            get(crawl_read_handler).delete(crawl_cancel_handler),
+        )
+        .route("/crawls/{id}/assets/{asset_id}", get(crawl_asset_handler))
         .with_state(state)
         // CORS: this surface is meant to be called by a browser/Worker over fetch
         // (the @envoyage/browser SDK), so it MUST answer cross-origin preflights and
@@ -165,29 +173,27 @@ async fn mcp_http_handler(
     {
         crate::serve::state::set_session_cdp_url(&session_id, url.to_string());
     }
-    let response = match tokio::task::spawn_blocking(move || {
-        mcp::handle_request(&session_id, &request)
-    })
-    .await
-    {
-        Ok(resp) => resp,
-        Err(join_err) => {
-            // The tool panicked on the blocking thread — surface a clean JSON-RPC
-            // error instead of dropping the connection (which is what shows up as
-            // an empty/EOF body on the client).
-            let error = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": null,
-                "error": { "code": -32603, "message": format!("tool panicked: {join_err}") }
-            });
-            return (
-                StatusCode::OK,
-                [("content-type", "application/json")],
-                error.to_string(),
-            )
-                .into_response();
-        }
-    };
+    let response =
+        match tokio::task::spawn_blocking(move || mcp::handle_request(&session_id, &request)).await
+        {
+            Ok(resp) => resp,
+            Err(join_err) => {
+                // The tool panicked on the blocking thread — surface a clean JSON-RPC
+                // error instead of dropping the connection (which is what shows up as
+                // an empty/EOF body on the client).
+                let error = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32603, "message": format!("tool panicked: {join_err}") }
+                });
+                return (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    error.to_string(),
+                )
+                    .into_response();
+            }
+        };
     let json = serde_json::to_string(&response).unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal serialization error"}}"#
             .to_string()
@@ -210,12 +216,7 @@ async fn mcp_http_handler(
         )
             .into_response()
     } else {
-        (
-            StatusCode::OK,
-            [("content-type", "application/json")],
-            json,
-        )
-            .into_response()
+        (StatusCode::OK, [("content-type", "application/json")], json).into_response()
     }
 }
 
@@ -309,6 +310,151 @@ async fn input_handler(
     }
 }
 
+/// Start one bounded crawl. `Idempotency-Key` is mandatory: a replay with the
+/// exact body returns the original job; reusing it with a changed body fails.
+async fn crawl_start_handler(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let Some(idempotency_key) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return crawl_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required");
+    };
+    let request: CrawlRequest = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return crawl_error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid crawl request: {error}"),
+            );
+        }
+    };
+    let key = idempotency_key.to_string();
+    match tokio::task::spawn_blocking(move || crawl::service()?.start(request, &key)).await {
+        Ok(Ok(job)) => json_response(StatusCode::ACCEPTED, &job),
+        Ok(Err(error)) => crawl_service_error(&error),
+        Err(error) => crawl_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("crawl task failed: {error}"),
+        ),
+    }
+}
+
+/// Read one page of normalized crawl results. Provider pagination URLs never
+/// leave Envoyage; callers receive/pass only the opaque `cursor` query value.
+async fn crawl_read_handler(
+    State(state): State<Arc<HttpState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let cursor = query.get("cursor").cloned();
+    match tokio::task::spawn_blocking(move || crawl::service()?.read(&id, cursor.as_deref())).await
+    {
+        Ok(Ok(job)) => json_response(StatusCode::OK, &job),
+        Ok(Err(error)) => crawl_service_error(&error),
+        Err(error) => crawl_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("crawl task failed: {error}"),
+        ),
+    }
+}
+
+async fn crawl_cancel_handler(
+    State(state): State<Arc<HttpState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    match tokio::task::spawn_blocking(move || crawl::service()?.cancel(&id)).await {
+        Ok(Ok(job)) => json_response(StatusCode::OK, &job),
+        Ok(Err(error)) => crawl_service_error(&error),
+        Err(error) => crawl_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("crawl task failed: {error}"),
+        ),
+    }
+}
+
+/// Return one exact raster image that appeared in this crawl's normalized
+/// result. The crawl service re-checks DNS and every redirect, enforces the
+/// job's byte budget and caches the first successful bytes for exact replay.
+async fn crawl_asset_handler(
+    State(state): State<Arc<HttpState>>,
+    Path((id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    match tokio::task::spawn_blocking(move || crawl::service()?.download_asset(&id, &asset_id))
+        .await
+    {
+        Ok(Ok(asset)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, asset.content_type)
+            .header(header::CONTENT_LENGTH, asset.bytes.len().to_string())
+            .header(header::CACHE_CONTROL, "private, no-store")
+            .header("x-envoyage-content-sha256", asset.sha256)
+            .body(Body::from(asset.bytes))
+            .unwrap_or_else(|error| {
+                crawl_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("build crawl asset response: {error}"),
+                )
+            }),
+        Ok(Err(error)) => crawl_service_error(&error),
+        Err(error) => crawl_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("crawl task failed: {error}"),
+        ),
+    }
+}
+
+fn crawl_service_error(error: &str) -> Response {
+    let status = if error == "crawl job not found" || error.starts_with("crawl asset not found") {
+        StatusCode::NOT_FOUND
+    } else if error.starts_with("crawling is not configured") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if error.starts_with("crawl provider")
+        || error.starts_with("start crawl provider")
+        || error.starts_with("download crawl asset")
+        || error.starts_with("crawl asset download failed")
+    {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    crawl_error(status, error)
+}
+
+fn crawl_error(status: StatusCode, message: &str) -> Response {
+    json_response(status, &serde_json::json!({ "error": message }))
+}
+
+fn json_response<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
+    match serde_json::to_string(value) {
+        Ok(body) => (status, [("content-type", "application/json")], body).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "application/json")],
+            format!(r#"{{"error":"response serialization failed: {error}"}}"#),
+        )
+            .into_response(),
+    }
+}
+
 /// Permissive CORS for the browser/Worker SDK. Reflects the request `Origin` (so a
 /// bearer-authed cross-origin fetch is allowed) and short-circuits the OPTIONS
 /// preflight with the allowed methods + headers. No credentials mode: this surface
@@ -335,13 +481,13 @@ async fn cors(req: Request, next: Next) -> Response {
     if is_preflight {
         h.insert(
             header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, POST, OPTIONS"),
+            HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
         );
         // The SDK sends content-type + the MCP session/CDP routing headers + bearer.
         h.insert(
             header::ACCESS_CONTROL_ALLOW_HEADERS,
             HeaderValue::from_static(
-                "content-type, accept, authorization, mcp-session-id, x-envoyage-cdp-url",
+                "content-type, accept, authorization, idempotency-key, mcp-session-id, x-envoyage-cdp-url",
             ),
         );
         h.insert(
@@ -385,11 +531,18 @@ mod tests {
 
     #[test]
     fn auth_enabled_requires_exact_bearer_match() {
-        let state = HttpState { auth_token: Some("s3cret".into()) };
+        let state = HttpState {
+            auth_token: Some("s3cret".into()),
+        };
         // Correct token → allowed (None).
         assert!(check_auth(&state, &headers_with_auth(Some("Bearer s3cret"))).is_none());
         // Wrong token, missing header, and wrong scheme → 401 (Some).
-        for bad in [None, Some("Bearer nope"), Some("s3cret"), Some("Basic s3cret")] {
+        for bad in [
+            None,
+            Some("Bearer nope"),
+            Some("s3cret"),
+            Some("Basic s3cret"),
+        ] {
             let resp = check_auth(&state, &headers_with_auth(bad));
             let resp = resp.unwrap_or_else(|| panic!("expected 401 for {bad:?}"));
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -411,7 +564,11 @@ mod tests {
             let env = format!(r#"{{"type":"{t}","x":1}}"#);
             assert_eq!(envelope_type(&env), Some(t), "{t} should name itself");
         }
-        assert_eq!(envelope_type(r#"{"nope":true}"#), None, "unknown → fallback");
+        assert_eq!(
+            envelope_type(r#"{"nope":true}"#),
+            None,
+            "unknown → fallback"
+        );
     }
 
     // The input body must deserialize from the exact protocol wire shape the WS
@@ -462,7 +619,10 @@ mod tests {
             .unwrap();
         assert_eq!(pre.status(), StatusCode::NO_CONTENT);
         let ph = pre.headers();
-        assert_eq!(ph.get("access-control-allow-origin").unwrap(), "http://localhost:5747");
+        assert_eq!(
+            ph.get("access-control-allow-origin").unwrap(),
+            "http://localhost:5747"
+        );
         assert!(ph.get("access-control-allow-methods").is_some());
         assert!(
             ph.get("access-control-allow-headers")
@@ -487,7 +647,10 @@ mod tests {
             .unwrap();
         assert_eq!(post_resp.status(), StatusCode::OK);
         assert_eq!(
-            post_resp.headers().get("access-control-allow-origin").unwrap(),
+            post_resp
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
             "http://localhost:5747",
         );
     }

@@ -5,11 +5,20 @@ All notable changes to `@envoyage/browser` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **API stability:** the public API — `createSession()` and the `BrowserSession`
-> class (its driving methods, event stream, and `sendInput()`) — is **stable
-> across patch versions**. A patch (`0.1.x`) never changes the API surface; any
+## [0.2.0] — 2026-08-14
+
+### Added
+- `createCrawlClient()` and `CrawlClient.start/read/cancel/downloadAsset` for
+  Envoyage's bounded website crawl contract.
+- Typed crawl requests, limits, normalized page/section/media results, progress,
+  opaque cursors and exact raster downloads. The core remains Workers-safe and
+  uses only `fetch`.
+
+> **API stability:** the public API — `createSession()` / `BrowserSession` and
+> `createCrawlClient()` / `CrawlClient` — is **stable across patch versions**.
+> A patch never changes the API surface; any
 > breaking change gets a minor/major bump **and** its own CHANGELOG entry. Pin to
-> `~0.1.1` (or an exact version) and patch-upgrade safely.
+> `~0.2.0` (or an exact version) and patch-upgrade safely.
 
 ## [0.1.2] — 2026-07-11
 

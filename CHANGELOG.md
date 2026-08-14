@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Bounded website crawling** behind one Envoyage contract: durable exact
+  idempotency, start/read/cancel over REST and MCP, normalized page sections,
+  links and ordered media, opaque pagination, public-host and limit checks, and
+  job-scoped raster downloads with redirect/DNS checks and exact cached replay.
+  The first provider adapter targets an unmodified private Firecrawl v2 service;
+  its credentials, job IDs and response shape stay server-side. See
+  [`docs/crawling.md`](docs/crawling.md).
 - **Anti-detection layer** ([`src/stealth.rs`](src/stealth.rs), applied in
   `attach_target` so both the local-spawn and remote-`connect` paths + popups
   inherit it): `--disable-blink-features=AutomationControlled` +
