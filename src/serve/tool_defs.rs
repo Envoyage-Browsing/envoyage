@@ -19,7 +19,7 @@ fn tool_defs() -> Vec<Value> {
                         "additionalProperties": false,
                         "properties": {
                             "url": { "type": "string", "format": "uri", "description": "Public http/https URL to start from." },
-                            "adapter": { "type": "string", "enum": ["auto", "generic", "shopify_collection"], "default": "auto", "description": "auto uses a verified site adapter when one matches, otherwise the configured generic crawler." },
+                            "adapter": { "type": "string", "enum": ["auto", "generic", "shopify_collection", "shopify_product"], "default": "auto", "description": "auto uses a verified site adapter when one matches, otherwise the configured generic crawler." },
                             "allowedHosts": { "type": "array", "maxItems": 20, "items": { "type": "string" }, "description": "Exact public hosts that pages, links and media may come from. Defaults to the URL host." },
                             "includePaths": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 256 } },
                             "excludePaths": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 256 } },

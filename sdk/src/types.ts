@@ -122,7 +122,7 @@ export interface LaunchOptions {
 
 export type CrawlDiscovery = "sitemap_and_links" | "sitemap_only" | "links_only";
 export type CrawlRenderPolicy = "auto" | "static" | "browser";
-export type CrawlAdapter = "auto" | "generic" | "shopify_collection";
+export type CrawlAdapter = "auto" | "generic" | "shopify_collection" | "shopify_product";
 export type CrawlState = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface CrawlLimits {

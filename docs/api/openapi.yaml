@@ -425,7 +425,7 @@ components:
         url: { type: string, format: uri, maxLength: 2048 }
         adapter:
           type: string
-          enum: [auto, generic, shopify_collection]
+          enum: [auto, generic, shopify_collection, shopify_product]
           default: auto
         allowedHosts:
           type: array
