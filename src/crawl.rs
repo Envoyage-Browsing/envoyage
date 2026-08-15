@@ -68,6 +68,7 @@ pub enum CrawlAdapter {
     Auto,
     Generic,
     ShopifyCollection,
+    ShopifyProduct,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -576,6 +577,13 @@ struct ShopifyImage {
     alt: Option<String>,
 }
 
+// The public /products/{handle}.json endpoint wraps the very same product shape the
+// collection feed lists, so both paths share ShopifyProduct and its contentSha256.
+#[derive(Debug, Deserialize)]
+struct ShopifyProductEnvelope {
+    product: ShopifyProduct,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ShopifySnapshot {
     documents: Vec<Value>,
@@ -626,12 +634,110 @@ impl ShopifyCollectionProvider {
         Ok(url)
     }
 
+    fn product_url(request: &CrawlRequest) -> Result<Url, String> {
+        let mut url = Url::parse(&request.url).map_err(|error| error.to_string())?;
+        let segments = url
+            .path_segments()
+            .ok_or("Shopify Product URL has no path")?
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let Some(products_index) = segments.iter().position(|segment| segment == "products") else {
+            return Err("Shopify adapter needs a /products/{handle} URL".to_string());
+        };
+        let Some(handle) = segments.get(products_index + 1) else {
+            return Err("Shopify adapter needs a Product handle".to_string());
+        };
+        let handle = handle.trim_end_matches(".json").trim_end_matches(".js");
+        if handle.is_empty() {
+            return Err("Shopify adapter needs a Product handle".to_string());
+        }
+        url.set_path(&format!("/products/{handle}.json"));
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    /// One Product becomes one page. The collection feed and the single-Product feed
+    /// carry the same product shape, so both build the receipt through here.
+    fn product_document(
+        seed: &Url,
+        product: &ShopifyProduct,
+        breadcrumb_root: &str,
+        resolve_dns: bool,
+        asset_hosts: &mut BTreeSet<String>,
+    ) -> Result<Value, String> {
+        let product_url = seed
+            .join(&format!("/products/{}", product.handle))
+            .map_err(|error| format!("build Shopify Product URL: {error}"))?;
+        let media = product
+            .images
+            .iter()
+            .map(|image| {
+                let image_url = Url::parse(&image.src)
+                    .map_err(|error| format!("invalid Shopify image URL: {error}"))?;
+                if !matches!(image_url.scheme(), "http" | "https") {
+                    return Err("Shopify image URL must use http or https".to_string());
+                }
+                let host = image_url
+                    .host_str()
+                    .ok_or("Shopify image URL has no host")?
+                    .to_ascii_lowercase();
+                if resolve_dns {
+                    ensure_public_dns(&host)?;
+                }
+                asset_hosts.insert(host);
+                Ok(json!({
+                    "url": image_url.to_string(),
+                    "position": image.position.saturating_sub(1),
+                    "alt": image.alt,
+                    "width": image.width,
+                    "height": image.height,
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let canonical = product_url.to_string();
+        let product_key = if product.handle.is_empty() {
+            product.id.to_string()
+        } else {
+            product.handle.clone()
+        };
+        let content_sha256 = sha256_json(product)?;
+        Ok(json!({
+            "markdown": product.body_html,
+            "breadcrumbs": [breadcrumb_root, product.title],
+            "envoyageMedia": media,
+            "metadata": {
+                "sourceURL": canonical,
+                "canonicalUrl": canonical,
+                "title": product.title,
+                "statusCode": 200,
+                "pageType": "product",
+                "productKey": product_key,
+                "contentSha256": content_sha256,
+            }
+        }))
+    }
+
     fn snapshot_path(&self, id: &str) -> PathBuf {
         self.state_dir.join(format!("shopify-{id}.json"))
     }
 
+    /// A /products/{handle} segment names one Product, even under a collection prefix.
+    fn wants_product(request: &CrawlRequest) -> bool {
+        match request.adapter {
+            CrawlAdapter::ShopifyProduct => true,
+            CrawlAdapter::ShopifyCollection => false,
+            _ => Self::product_url(request).is_ok(),
+        }
+    }
+
     fn supports(request: &CrawlRequest) -> bool {
-        Self::feed_url(request, 1).is_ok()
+        if Self::wants_product(request) {
+            Self::product_url(request).is_ok()
+        } else {
+            Self::feed_url(request, 1).is_ok()
+        }
     }
 }
 
@@ -645,12 +751,18 @@ impl CrawlProvider for ShopifyCollectionProvider {
             "shopify_{}",
             &sha256_text(&format!("{}\0{idempotency_key}", request.url))[..32]
         );
+        let as_product = Self::wants_product(request);
+        let adapter_name = if as_product {
+            "shopify_product"
+        } else {
+            "shopify_collection"
+        };
         let path = self.snapshot_path(&provider_id);
         if path.exists() {
             let snapshot: ShopifySnapshot = read_json(&path, "Shopify collection snapshot")?;
             return Ok(ProviderStart {
                 id: provider_id,
-                adapter: "shopify_collection".to_string(),
+                adapter: adapter_name.to_string(),
                 adapter_version: crawl_adapter_version(),
                 asset_hosts: snapshot.asset_hosts,
             });
@@ -661,41 +773,63 @@ impl CrawlProvider for ShopifyCollectionProvider {
             .host_str()
             .ok_or("Shopify collection URL has no host")?;
         let mut products = Vec::new();
-        let mut page = 1_u32;
         let mut exceeded_page_limit = false;
-        loop {
-            let feed_url = Self::feed_url(request, page)?;
+        if as_product {
+            let product_url = Self::product_url(request)?;
             if self.resolve_dns {
                 ensure_public_dns(seed_host)?;
             }
             let response = self
                 .client
-                .get(feed_url)
+                .get(product_url)
                 .send()
-                .map_err(|error| format!("read Shopify collection: {error}"))?;
+                .map_err(|error| format!("read Shopify Product: {error}"))?;
             if !response.status().is_success() {
                 return Err(format!(
-                    "Shopify collection feed returned HTTP {}",
+                    "Shopify Product feed returned HTTP {}",
                     response.status().as_u16()
                 ));
             }
-            let feed: ShopifyFeed = response
+            let envelope: ShopifyProductEnvelope = response
                 .json()
-                .map_err(|error| format!("decode Shopify collection feed: {error}"))?;
-            if feed.products.is_empty() {
-                break;
-            }
-            for product in feed.products {
-                if products.len() >= request.limits.max_pages as usize {
-                    exceeded_page_limit = true;
+                .map_err(|error| format!("decode Shopify Product feed: {error}"))?;
+            products.push(envelope.product);
+        } else {
+            let mut page = 1_u32;
+            loop {
+                let feed_url = Self::feed_url(request, page)?;
+                if self.resolve_dns {
+                    ensure_public_dns(seed_host)?;
+                }
+                let response = self
+                    .client
+                    .get(feed_url)
+                    .send()
+                    .map_err(|error| format!("read Shopify collection: {error}"))?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Shopify collection feed returned HTTP {}",
+                        response.status().as_u16()
+                    ));
+                }
+                let feed: ShopifyFeed = response
+                    .json()
+                    .map_err(|error| format!("decode Shopify collection feed: {error}"))?;
+                if feed.products.is_empty() {
                     break;
                 }
-                products.push(product);
+                for product in feed.products {
+                    if products.len() >= request.limits.max_pages as usize {
+                        exceeded_page_limit = true;
+                        break;
+                    }
+                    products.push(product);
+                }
+                if exceeded_page_limit || products.len() % 250 != 0 {
+                    break;
+                }
+                page = page.saturating_add(1);
             }
-            if exceeded_page_limit || products.len() % 250 != 0 {
-                break;
-            }
-            page = page.saturating_add(1);
         }
         if products.is_empty() {
             return Err("Shopify collection contained no Products".to_string());
@@ -715,56 +849,13 @@ impl CrawlProvider for ShopifyCollectionProvider {
         let mut asset_hosts = BTreeSet::new();
         let mut documents = Vec::with_capacity(products.len());
         for product in products {
-            let product_url = seed
-                .join(&format!("/products/{}", product.handle))
-                .map_err(|error| format!("build Shopify Product URL: {error}"))?;
-            let media = product
-                .images
-                .iter()
-                .map(|image| {
-                    let image_url = Url::parse(&image.src)
-                        .map_err(|error| format!("invalid Shopify image URL: {error}"))?;
-                    if !matches!(image_url.scheme(), "http" | "https") {
-                        return Err("Shopify image URL must use http or https".to_string());
-                    }
-                    let host = image_url
-                        .host_str()
-                        .ok_or("Shopify image URL has no host")?
-                        .to_ascii_lowercase();
-                    if self.resolve_dns {
-                        ensure_public_dns(&host)?;
-                    }
-                    asset_hosts.insert(host);
-                    Ok(json!({
-                        "url": image_url.to_string(),
-                        "position": image.position.saturating_sub(1),
-                        "alt": image.alt,
-                        "width": image.width,
-                        "height": image.height,
-                    }))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let canonical = product_url.to_string();
-            let product_key = if product.handle.is_empty() {
-                product.id.to_string()
-            } else {
-                product.handle.clone()
-            };
-            let content_sha256 = sha256_json(&product)?;
-            documents.push(json!({
-                "markdown": product.body_html,
-                "breadcrumbs": ["Collection", product.title],
-                "envoyageMedia": media,
-                "metadata": {
-                    "sourceURL": canonical,
-                    "canonicalUrl": canonical,
-                    "title": product.title,
-                    "statusCode": 200,
-                    "pageType": "product",
-                    "productKey": product_key,
-                    "contentSha256": content_sha256,
-                }
-            }));
+            documents.push(Self::product_document(
+                &seed,
+                &product,
+                if as_product { "Product" } else { "Collection" },
+                self.resolve_dns,
+                &mut asset_hosts,
+            )?);
         }
         let snapshot = ShopifySnapshot {
             documents,
@@ -779,7 +870,7 @@ impl CrawlProvider for ShopifyCollectionProvider {
         write_json(&path, &snapshot, "Shopify collection snapshot")?;
         Ok(ProviderStart {
             id: provider_id,
-            adapter: "shopify_collection".to_string(),
+            adapter: adapter_name.to_string(),
             adapter_version: crawl_adapter_version(),
             asset_hosts: snapshot.asset_hosts,
         })
@@ -843,12 +934,17 @@ impl CrawlProvider for CrawlProviderRouter {
     ) -> Result<ProviderStart, String> {
         let try_shopify = matches!(
             request.adapter,
-            CrawlAdapter::Auto | CrawlAdapter::ShopifyCollection
+            CrawlAdapter::Auto | CrawlAdapter::ShopifyCollection | CrawlAdapter::ShopifyProduct
         ) && ShopifyCollectionProvider::supports(request);
         if try_shopify {
             match self.shopify.start(request, idempotency_key) {
                 Ok(started) => return Ok(started),
-                Err(error) if request.adapter == CrawlAdapter::ShopifyCollection => {
+                Err(error)
+                    if matches!(
+                        request.adapter,
+                        CrawlAdapter::ShopifyCollection | CrawlAdapter::ShopifyProduct
+                    ) =>
+                {
                     return Err(error);
                 }
                 Err(_) => {}
@@ -2211,6 +2307,123 @@ mod tests {
         assert_eq!(page.media[0].width, Some(2001));
         assert_eq!(page.media[0].height, Some(3000));
         assert_eq!(page.content_sha256, "a".repeat(64));
+    }
+
+    fn product_fixture() -> ShopifyProduct {
+        ShopifyProduct {
+            id: 6239034,
+            title: "Black cotton set".to_string(),
+            handle: "black-set".to_string(),
+            body_html: "Soft cotton set".to_string(),
+            images: vec![
+                ShopifyImage {
+                    position: 1,
+                    src: "https://cdn.shop.example/black-front.jpg".to_string(),
+                    width: 2001,
+                    height: 3000,
+                    alt: Some("front".to_string()),
+                },
+                ShopifyImage {
+                    position: 2,
+                    src: "https://cdn.shop.example/black-back.jpg".to_string(),
+                    width: 2001,
+                    height: 3000,
+                    alt: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn auto_picks_the_product_adapter_for_a_single_product_url() {
+        let mut req = request();
+        req.adapter = CrawlAdapter::Auto;
+        req.url = "https://shop.example/products/6239034".to_string();
+        assert!(ShopifyCollectionProvider::wants_product(&req));
+        assert!(ShopifyCollectionProvider::supports(&req));
+        assert_eq!(
+            ShopifyCollectionProvider::product_url(&req).unwrap().as_str(),
+            "https://shop.example/products/6239034.json"
+        );
+
+        let mut collection = request();
+        collection.adapter = CrawlAdapter::Auto;
+        assert!(!ShopifyCollectionProvider::wants_product(&collection));
+        assert!(ShopifyCollectionProvider::supports(&collection));
+
+        let mut other = request();
+        other.adapter = CrawlAdapter::Auto;
+        other.url = "https://shop.example/pages/about".to_string();
+        assert!(!ShopifyCollectionProvider::supports(&other));
+    }
+
+    #[test]
+    fn one_product_url_becomes_one_completed_page_with_ordered_media() {
+        let product = product_fixture();
+        let seed = Url::parse("https://shop.example/products/black-set").unwrap();
+        let mut asset_hosts = BTreeSet::new();
+        let document = ShopifyCollectionProvider::product_document(
+            &seed,
+            &product,
+            "Product",
+            false,
+            &mut asset_hosts,
+        )
+        .unwrap();
+        assert_eq!(
+            asset_hosts,
+            BTreeSet::from(["cdn.shop.example".to_string()])
+        );
+
+        let mut req = request();
+        req.adapter = CrawlAdapter::ShopifyProduct;
+        req.url = "https://shop.example/products/black-set".to_string();
+        let mut bytes = 0;
+        let mut assets = 0;
+        let mut warnings = Vec::new();
+        let page = normalize_document(
+            document,
+            &req,
+            &BTreeSet::from(["shop.example".to_string()]),
+            &BTreeSet::from(["cdn.shop.example".to_string()]),
+            &mut bytes,
+            &mut assets,
+            &mut warnings,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.page_type.as_deref(), Some("product"));
+        assert_eq!(page.product_key.as_deref(), Some("black-set"));
+        assert_eq!(
+            page.canonical_url.as_deref(),
+            Some("https://shop.example/products/black-set")
+        );
+        assert_eq!(page.breadcrumbs, vec!["Product", "Black cotton set"]);
+        assert_eq!(page.media.len(), 2);
+        assert_eq!(page.media[0].position, 0);
+        assert_eq!(page.media[1].position, 1);
+        assert_eq!(page.content_sha256, sha256_json(&product).unwrap());
+    }
+
+    #[test]
+    fn a_product_url_no_longer_falls_through_to_the_unconfigured_generic_provider() {
+        let dir = test_dir("shopify-product-route");
+        let router = CrawlProviderRouter {
+            generic: None,
+            shopify: ShopifyCollectionProvider::new(dir.clone(), false).unwrap(),
+        };
+        let mut req = request();
+        req.adapter = CrawlAdapter::ShopifyProduct;
+        req.url = "https://shop.example/products/6239034".to_string();
+        // shop.example does not resolve, so the fetch fails — the point is WHICH error:
+        // the Product adapter's, not "this URL has no verified site adapter".
+        let error = router.start(&req, "factory-import-004").unwrap_err();
+        assert!(
+            !error.contains("no verified site adapter"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("Shopify Product"), "unexpected error: {error}");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
