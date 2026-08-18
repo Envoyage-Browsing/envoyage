@@ -202,9 +202,16 @@ pick the mascot's pose (a "click" tap, a "type" lean-in, a "scroll" drift).
 |-----|---------|---------|
 | `ENVOYAGE_HOME` | `~/.envoyage` | Base dir for `browser.lock` + the persistent browser profile. |
 | `ENVOYAGE_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
+| `ENVOYAGE_BROWSER_MEMORY_LIMIT_MB` | `4096` | Combined RSS ceiling for Envoyage's local Chromium process group. Values are clamped to 256–131072 MiB. |
 | `ENVOYAGE_BROWSER_EVAL` | unset | `1` exposes the gated `browser_eval` tool. |
 | `ENVOYAGE_GITHUB_REPO` | `Envoyage-Browsing/envoyage` | Release source for the npm wrapper. |
 
 One real browser drives the shared profile at a time (a cross-process lock).
 The first `serve` owns it; a later one that finds a live owner refuses rather
 than corrupting the profile.
+
+The local process tree has a hard memory guard. Envoyage measures the process
+group it created, closes only that group when it crosses the limit, and bounds
+pending screencast frames, viewer backlog, input backlog, closed-session pumps,
+and replay state. Hosted browsers connected with `--cdp-url` are owned and
+measured by their provider instead.

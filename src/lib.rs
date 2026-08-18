@@ -25,6 +25,7 @@ pub mod browser;
 pub mod browser_lock;
 pub mod crawl;
 pub mod protocol;
+mod resource_guard;
 pub mod serve;
 pub mod stealth;
 pub mod transport;

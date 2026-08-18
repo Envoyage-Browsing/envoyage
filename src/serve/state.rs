@@ -19,6 +19,13 @@ use tokio::sync::{broadcast, mpsc};
 /// HTTP transport keys by the client's `Mcp-Session-Id` header instead.
 pub const DEFAULT_SESSION: &str = "stdio";
 
+/// The live view only needs recent frames. A small bounded bus prevents a slow
+/// or paused consumer from retaining hundreds of full base64 images.
+const LIVE_VIEW_BUS_CAP: usize = 8;
+/// Human input is also bounded so a disconnected or hostile viewer cannot grow
+/// an unbounded queue while the browser is busy.
+const INPUT_QUEUE_CAP: usize = 256;
+
 /// One session's browser slot: the exact `Mutex<Option<BrowserSession>>` the
 /// single-browser design used, now one PER session so tool calls on different
 /// sessions never serialize against each other (a slow navigate in session A
@@ -148,8 +155,8 @@ const REPLAY_TYPES: [&str; 4] =
 /// process, each with its own live view + input path.
 struct Channels {
     tx: broadcast::Sender<WsEnvelope>,
-    input_tx: mpsc::UnboundedSender<Input>,
-    input_rx: Mutex<mpsc::UnboundedReceiver<Input>>,
+    input_tx: mpsc::Sender<Input>,
+    input_rx: Mutex<mpsc::Receiver<Input>>,
     /// Wakes the pump the instant input arrives so it dispatches without waiting
     /// out the frame tick (cuts perceived input latency from up to PUMP_TICK to
     /// ~0). A plain std channel so the std pump thread can block on it with a
@@ -164,8 +171,8 @@ struct Channels {
 
 impl Channels {
     fn new() -> Self {
-        let (tx, _) = broadcast::channel(256);
-        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (tx, _) = broadcast::channel(LIVE_VIEW_BUS_CAP);
+        let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
         Channels {
             tx,
@@ -232,9 +239,30 @@ pub fn replay_envelopes_of(session_id: &str) -> Vec<WsEnvelope> {
 /// A viewer sends one human input event toward `session_id`'s pump.
 pub fn push_input_to(session_id: &str, ev: Input) {
     let ch = channels(session_id);
-    let _ = ch.input_tx.send(ev);
-    // Wake the pump so it dispatches this event now instead of on the next tick.
+    if ch.input_tx.try_send(ev).is_ok() {
+        // Wake the pump so it dispatches this event now instead of on the next tick.
+        let _ = ch.wake_tx.send(());
+    }
+}
+
+/// Wake a session pump without queueing input (used to stop it promptly).
+pub fn wake_pump(session_id: &str) {
+    let ch = channels(session_id);
     let _ = ch.wake_tx.send(());
+}
+
+/// Drop all non-browser state retained for a closed session, including the last
+/// base64 frame. The pump is stopped before this is called.
+pub fn clear_session_state(session_id: &str) {
+    if let Ok(mut map) = session_cdp_urls().lock() {
+        map.remove(session_id);
+    }
+    if let Ok(mut map) = paused_map().lock() {
+        map.remove(session_id);
+    }
+    if let Ok(mut map) = channels_registry().lock() {
+        map.remove(session_id);
+    }
 }
 
 /// Block the pump thread until input arrives (wakes early) or `tick` elapses
@@ -376,5 +404,33 @@ mod tests {
         remove_session("sess-a");
         remove_session("sess-b");
         set_paused("sess-a", false);
+    }
+
+    #[test]
+    fn live_view_bus_drops_old_frames_instead_of_retaining_them() {
+        let sid = "bounded-bus-test";
+        let mut rx = subscribe_to(sid);
+        for seq in 0..(LIVE_VIEW_BUS_CAP + 5) {
+            broadcast_envelope_to(
+                sid,
+                format!(r#"{{"type":"browser_frame","seq":{seq},"png_base64":"AA"}}"#),
+            );
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(5))
+        ));
+        clear_session_state(sid);
+    }
+
+    #[test]
+    fn clearing_a_session_drops_its_replay_frame_and_pause_state() {
+        let sid = "clear-session-test";
+        broadcast_envelope_to(sid, r#"{"type":"browser_frame","png_base64":"large"}"#.into());
+        set_paused(sid, true);
+        clear_session_state(sid);
+        assert!(!is_paused(sid));
+        assert!(replay_envelopes_of(sid).is_empty());
+        clear_session_state(sid);
     }
 }

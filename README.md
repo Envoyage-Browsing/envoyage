@@ -195,6 +195,7 @@ cursor:
 |-----|---------|---------|
 | `ENVOYAGE_HOME` | `~/.envoyage` | Base dir for `browser.lock` + the persistent browser profile. |
 | `ENVOYAGE_BROWSER_BIN` | auto-detect | Path to a Chromium/Chrome/Brave/Edge binary. |
+| `ENVOYAGE_BROWSER_MEMORY_LIMIT_MB` | `4096` | Maximum combined RSS for the local Chromium process group. Envoyage closes only its own browser group when the limit is crossed. Values are clamped to 256–131072 MiB. Remote browsers are not measured locally. |
 | `ENVOYAGE_BROWSER_EVAL` | unset | Set to `1` to expose the gated `browser_eval` tool. |
 | `ENVOYAGE_MASK_ALL_INPUTS` | unset | `1`/`true` → mask **every** input/textarea/select value in the `read_page`/`find` AX listing (value withheld, `masked:true`). `<input type="password">` is always masked regardless. |
 | `ENVOYAGE_MASK_SELECTOR` | unset | CSS selector; any field matching it (or a descendant of a match) has its AX value masked. A bad selector is ignored, never throws. Also always-honored: mark a field or ancestor with the `[data-envoyage-mask]` attribute to mask it. |
@@ -206,6 +207,12 @@ cursor:
 Only one real browser drives the shared profile at a time — a cross-process
 lock (`$ENVOYAGE_HOME/browser.lock`) makes the first `serve` the owner; a later
 one that finds a live owner refuses rather than corrupting the profile.
+
+Local browser memory is bounded twice: Envoyage retains at most two pending
+screencast frames and eight queued live-view events, and a watchdog measures
+the combined RSS of the exact Chromium process group Envoyage spawned. If that
+group crosses the configured limit, Envoyage terminates that group. It never
+signals another Chrome, Brave, Edge, or Code process.
 
 ## Status / not-yet
 

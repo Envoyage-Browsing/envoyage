@@ -9,16 +9,17 @@ use super::state;
 use crate::browser::BrowserSession;
 use crate::browser_lock;
 use crate::protocol::{Frame, Input};
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-/// Session ids whose screencast pump thread is already running (each pump idles
-/// cheaply when its browser is closed, so spawn at most one per session).
-static PUMPS_STARTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// Stop handle for each live pump. A closed session removes and signals its
+/// handle, so unique MCP session ids cannot leave one idle thread each forever.
+static PUMPS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
-fn pumps_started() -> &'static Mutex<HashSet<String>> {
-    PUMPS_STARTED.get_or_init(|| Mutex::new(HashSet::new()))
+fn pumps() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    PUMPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// ~15fps. Frame coalescing means a slower tick just drops intermediate frames.
@@ -135,17 +136,29 @@ fn dispatch_input(session_id: &str, b: &mut BrowserSession, ev: Input) {
 /// per session: one process runs N pumps, one per session with a live browser,
 /// each streaming ITS browser's frames + draining ITS input onto ITS bus.
 pub fn ensure_pump_for(session_id: &str) {
-    {
-        let mut started = pumps_started().lock().expect("pumps registry poisoned");
-        if !started.insert(session_id.to_string()) {
+    let stop = {
+        let mut active = pumps().lock().expect("pumps registry poisoned");
+        if active.contains_key(session_id) {
             return; // already running for this session
         }
-    }
+        let stop = Arc::new(AtomicBool::new(false));
+        active.insert(session_id.to_string(), stop.clone());
+        stop
+    };
     let sid = session_id.to_string();
     std::thread::Builder::new()
         .name(format!("envoyage-pump-{session_id}"))
-        .spawn(move || pump_loop(&sid))
+        .spawn(move || pump_loop(&sid, &stop))
         .ok();
+}
+
+/// Stop and forget one session's pump. Safe to call when no pump exists.
+pub fn stop_pump_for(session_id: &str) {
+    let stop = pumps().lock().ok().and_then(|mut active| active.remove(session_id));
+    if let Some(stop) = stop {
+        stop.store(true, Ordering::Release);
+        state::wake_pump(session_id);
+    }
 }
 
 /// Back-compat: the stdio/WS surface streams the DEFAULT_SESSION.
@@ -161,7 +174,7 @@ pub fn ensure_pump() {
 /// compatible with ImmorTerm's deployed WS panel; the per-session SSE surface
 /// (`GET /sessions/:id/events`) subscribes to the SAME per-session bus, so each
 /// remote session gets its own live view without any wire change.
-fn pump_loop(session_id: &str) {
+fn pump_loop(session_id: &str, stop: &AtomicBool) {
     let mut seq: u64 = 0;
     // Target ids we've already seen. Each tick we follow any target that appeared
     // since — a popup/new tab opened WITHOUT a tool call (async OAuth redirect,
@@ -172,11 +185,14 @@ fn pump_loop(session_id: &str) {
     // (tabs_switch) never looks new, so a manual switch is never yanked back.
     let mut known: Vec<String> = Vec::new();
     let slot = state::browser_slot(session_id);
-    loop {
+    while !stop.load(Ordering::Acquire) {
         // Block until human input arrives (dispatched immediately) or the frame
         // tick elapses — instead of always sleeping the full tick, which added up
         // to PUMP_TICK of latency before an input was even sent to the browser.
         state::park_until_input_or(session_id, PUMP_TICK);
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         let inputs = state::drain_input_of(session_id);
         let frame = {
             let mut guard = match slot.lock() {

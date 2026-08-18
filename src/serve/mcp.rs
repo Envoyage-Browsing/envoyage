@@ -550,8 +550,10 @@ fn handle_eval(session_id: &str, args: &Value) -> Result<String, String> {
 }
 
 fn handle_close(session_id: &str) -> Result<String, String> {
+    super::pump::stop_pump_for(session_id);
     // Take the whole slot out of the registry so the session is fully gone.
     let Some(slot) = state::remove_session(session_id) else {
+        state::clear_session_state(session_id);
         return Ok("No browser session was open.".to_string());
     };
     let mut guard = slot
@@ -562,6 +564,7 @@ fn handle_close(session_id: &str) -> Result<String, String> {
             let pid = session.pid();
             drop(session);
             state::set_paused(session_id, false);
+            state::clear_session_state(session_id);
             if crate::browser_lock::read()
                 .map(|l| l.owner_pid == std::process::id())
                 .unwrap_or(false)
@@ -570,7 +573,10 @@ fn handle_close(session_id: &str) -> Result<String, String> {
             }
             Ok(format!("Browser closed (pid {pid})."))
         }
-        None => Ok("No browser session was open.".to_string()),
+        None => {
+            state::clear_session_state(session_id);
+            Ok("No browser session was open.".to_string())
+        }
     }
 }
 

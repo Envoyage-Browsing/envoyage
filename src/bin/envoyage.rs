@@ -95,6 +95,9 @@ OPTIONS:
 ENV:
     ENVOYAGE_HOME          Base dir for browser.lock + profile (default ~/.envoyage).
     ENVOYAGE_BROWSER_BIN   Path to a Chromium/Chrome/Brave/Edge binary override.
+    ENVOYAGE_BROWSER_MEMORY_LIMIT_MB
+                           Combined RSS ceiling for the local Chromium process
+                           group (default 4096; clamped to 256..131072 MiB).
     ENVOYAGE_BROWSER_EVAL  Set to 1 to expose the gated browser_eval tool.
     ENVOYAGE_AUTH_TOKEN    If set, --http-port requires Authorization: Bearer it.
     ENVOYAGE_HTTP_HOST     Bind host for --http-port (default 127.0.0.1).";
