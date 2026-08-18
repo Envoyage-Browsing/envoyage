@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsing onto the one process-global `--cdp-url` (or silently spawning local).
 
 ### Fixed
+- `browser_console` now includes uncaught page exceptions reported through
+  CDP's `Runtime.exceptionThrown`, so failures such as a React hydration abort
+  are visible even when the page never calls `console.error`.
 - **Unbounded local-browser memory growth**: pending screencast frames now keep
   only the newest two frames; live-view and human-input queues are bounded;
   `browser_close` removes its cached base64 frame and stops its pump thread;

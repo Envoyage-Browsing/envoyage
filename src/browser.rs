@@ -1481,8 +1481,9 @@ fn push_capped(buf: &mut Vec<String>, line: String) {
     }
 }
 
-/// Render a console-related CDP event (`Runtime.consoleAPICalled` or
-/// `Log.entryAdded`) as `level: text`. Returns `None` for any other frame.
+/// Render a console-related CDP event (`Runtime.consoleAPICalled`,
+/// `Runtime.exceptionThrown`, or `Log.entryAdded`) as `level: text`. Returns
+/// `None` for any other frame.
 fn parse_console_entry(v: &Value) -> Option<String> {
     let method = v.get("method").and_then(|m| m.as_str())?;
     let params = v.get("params")?;
@@ -1505,6 +1506,18 @@ fn parse_console_entry(v: &Value) -> Option<String> {
             let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("info");
             let text = entry.get("text").and_then(|t| t.as_str()).unwrap_or("");
             Some(format!("{level}: {text}"))
+        }
+        "Runtime.exceptionThrown" => {
+            let details = params.get("exceptionDetails")?;
+            let exception = details.get("exception");
+            let text = exception
+                .and_then(|value| value.get("description").and_then(|value| value.as_str()))
+                .or_else(|| {
+                    exception.and_then(|value| value.get("value").and_then(|value| value.as_str()))
+                })
+                .or_else(|| details.get("text").and_then(|value| value.as_str()))
+                .unwrap_or("Uncaught exception");
+            Some(format!("error: {text}"))
         }
         _ => None,
     }
@@ -1871,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_console_entry_handles_both_event_shapes() {
+    fn parse_console_entry_handles_console_log_and_exception_events() {
         let api = json!({
             "method": "Runtime.consoleAPICalled",
             "params": { "type": "error", "args": [
@@ -1885,6 +1898,21 @@ mod tests {
             "params": { "entry": { "level": "warning", "text": "deprecated" } }
         });
         assert_eq!(parse_console_entry(&log).unwrap(), "warning: deprecated");
+        let exception = json!({
+            "method": "Runtime.exceptionThrown",
+            "params": { "exceptionDetails": {
+                "text": "Uncaught",
+                "exception": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "Error: Hydration failed\n    at App"
+                }
+            }}
+        });
+        assert_eq!(
+            parse_console_entry(&exception).unwrap(),
+            "error: Error: Hydration failed\n    at App"
+        );
         // Non-console events are ignored.
         assert!(parse_console_entry(&json!({ "method": "Page.loadEventFired" })).is_none());
     }
