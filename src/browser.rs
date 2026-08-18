@@ -27,6 +27,7 @@
 //! events except `Page.loadEventFired`, which `navigate` awaits.
 
 use crate::transport::{CdpTransport, PipeTransport, WsTransport};
+use crate::resource_guard::BrowserMemoryGuard;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -198,6 +199,9 @@ pub struct BrowserSession {
     /// The spawned process handle, kept so close() can reap it (waitpid).
     /// `None` for a remote (WS) connection.
     child: Option<std::process::Child>,
+    /// Stops an Envoyage-owned local Chromium tree before it can exhaust the
+    /// machine. Remote browsers have no local process group and no guard.
+    memory_guard: Option<BrowserMemoryGuard>,
     /// Current AX snapshot: `ref_N` → node. Cleared on navigation / new read.
     refs: HashMap<String, AxNode>,
     ref_counter: usize,
@@ -235,6 +239,10 @@ pub struct BrowserSession {
 /// Cap for the console/network ring buffers — enough to debug a page load
 /// without unbounded memory if a page is chatty.
 const LOG_RING_CAP: usize = 200;
+/// Frames can arrive while a command owns the browser mutex. Only the newest
+/// frame is useful to the live view; cap this queue so a repaint storm cannot
+/// retain unbounded base64 images before the pump gets the mutex back.
+const PENDING_SCREENCAST_CAP: usize = 2;
 
 /// One `Page.screencastFrame` event pulled off the CDP pipe.
 pub struct ScreencastFrame {
@@ -334,6 +342,7 @@ impl BrowserSession {
             session_id: None,
             target_id: None,
             child: Some(child),
+            memory_guard: Some(BrowserMemoryGuard::spawn(pid)),
             refs: HashMap::new(),
             ref_counter: 0,
             screencast_on: false,
@@ -385,6 +394,7 @@ impl BrowserSession {
             session_id: None,
             target_id: None,
             child: None,
+            memory_guard: None,
             refs: HashMap::new(),
             ref_counter: 0,
             screencast_on: false,
@@ -1178,11 +1188,15 @@ impl BrowserSession {
     /// never kill a browser it did not spawn. We just stop the screencast (a
     /// best-effort CDP call) and drop the transport (which closes the socket).
     pub fn close(&mut self) {
+        // Stop the watcher before the deliberate shutdown. Taking both fields
+        // makes close idempotent: Drop after an explicit close cannot signal a
+        // PID that the OS may already have reused.
+        self.memory_guard.take();
         // Best-effort: stop the screencast before we kill/disconnect so the
         // encoder isn't left running mid-frame. Ignores errors (transport may be
         // dead already — we're tearing down regardless).
         self.stop_screencast();
-        let Some(pid) = self.pid else {
+        let Some(pid) = self.pid.take() else {
             // Remote connection: nothing to kill. Dropping self.transport on the
             // way out closes the WS.
             return;
@@ -1202,7 +1216,7 @@ impl BrowserSession {
             unsafe { nix::libc::kill(-pid, nix::libc::SIGKILL) };
         }
         // Reap the leader (waitpid) so it doesn't linger as a zombie.
-        if let Some(child) = self.child.as_mut() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
     }
@@ -1289,10 +1303,18 @@ impl BrowserSession {
     /// No-op for replies and any other event.
     fn capture_cdp_event(&mut self, v: &Value) {
         if let Some((data, sid)) = parse_screencast_frame(v) {
-            self.pending_screencast.push(ScreencastFrame {
+            let dropped = push_screencast_capped(&mut self.pending_screencast, ScreencastFrame {
                 data_base64: data,
                 ack_session_id: sid,
             });
+            // Ack frames dropped by the cap immediately so Chromium's encoder
+            // is never left waiting for a frame the live view will not use.
+            for ack_session_id in dropped {
+                let _ = self.cdp_fire(
+                    "Page.screencastFrameAck",
+                    json!({ "sessionId": ack_session_id }),
+                );
+            }
             return;
         }
         if let Some(line) = parse_console_entry(v) {
@@ -1358,6 +1380,18 @@ impl BrowserSession {
         }
         Ok(frames.into_iter().next_back().map(|f| f.data_base64))
     }
+}
+
+fn push_screencast_capped(
+    frames: &mut Vec<ScreencastFrame>,
+    frame: ScreencastFrame,
+) -> Vec<i64> {
+    frames.push(frame);
+    let overflow = frames.len().saturating_sub(PENDING_SCREENCAST_CAP);
+    frames
+        .drain(..overflow)
+        .map(|dropped| dropped.ack_session_id)
+        .collect()
 }
 
 impl Drop for BrowserSession {
@@ -1874,6 +1908,27 @@ mod tests {
         assert_eq!(buf.len(), LOG_RING_CAP);
         assert_eq!(buf.first().unwrap(), "line 5"); // first 5 dropped
         assert_eq!(buf.last().unwrap(), &format!("line {}", LOG_RING_CAP + 4));
+    }
+
+    #[test]
+    fn pending_screencast_keeps_only_the_newest_frames() {
+        let mut frames = Vec::new();
+        let mut dropped = Vec::new();
+        for sid in 0..100 {
+            dropped.extend(push_screencast_capped(
+                &mut frames,
+                ScreencastFrame {
+                    data_base64: format!("frame-{sid}"),
+                    ack_session_id: sid,
+                },
+            ));
+        }
+        assert_eq!(frames.len(), PENDING_SCREENCAST_CAP);
+        assert_eq!(frames[0].data_base64, "frame-98");
+        assert_eq!(frames[1].data_base64, "frame-99");
+        assert_eq!(dropped.len(), 98);
+        assert_eq!(dropped.first(), Some(&0));
+        assert_eq!(dropped.last(), Some(&97));
     }
 
     #[test]

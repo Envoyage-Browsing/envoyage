@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsing onto the one process-global `--cdp-url` (or silently spawning local).
 
 ### Fixed
+- **Unbounded local-browser memory growth**: pending screencast frames now keep
+  only the newest two frames; live-view and human-input queues are bounded;
+  `browser_close` removes its cached base64 frame and stops its pump thread;
+  and local Chromium is protected by a 4096 MiB process-group RSS watchdog
+  (`ENVOYAGE_BROWSER_MEMORY_LIMIT_MB`). The watchdog can signal only the exact
+  process group Envoyage spawned. Browser teardown is now idempotent, so an
+  explicit close followed by `Drop` cannot signal a reused PID.
 - **GIF export was completely broken** since the screencast switched to JPEG: the
   recorder decoded frames as PNG and the `image` crate lacked the `jpeg` feature,
   so every `browser_gif` export failed. Enabled `jpeg`, switched to
