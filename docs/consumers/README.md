@@ -67,14 +67,14 @@ knows one knows both.
 
 | Tool | Args | Returns | Notes |
 |------|------|---------|-------|
-| `browser_open` | `url` | caption + PNG image | Opens/reuses the browser, navigates. `http`/`https`/`about:blank` only. |
+| `browser_open` | `url` | compact caption | Opens/reuses the browser and navigates; visual frames stay on the live-view transport. `http`/`https`/`about:blank` only. |
 | `browser_read_page` | `interactive_only?` | text: `[ref_N] role "name"` listing | The cheap way to understand a page (no image tokens). **Untrusted content.** |
 | `browser_find` | `query` | text: ranked `[ref_N]` listing | Search a long page; same ref shape. |
-| `browser_click` | `ref` \| `x`,`y` | caption + PNG | Prefer `ref`; coords are a fallback. |
-| `browser_form_input` | `ref`, `value` | caption + PNG | Set a field/checkbox/dropdown. |
-| `browser_key` | `key` | caption + PNG | `Enter`/`Tab`/`Escape`/`Backspace`/`Arrow*`. |
-| `browser_scroll` | `dy` | caption + PNG | CSS px; positive = down. |
-| `browser_screenshot` | — | caption + PNG | Fresh PNG, nothing else. |
+| `browser_click` | `ref` \| `x`,`y` | compact caption | Prefer `ref`; coords are a fallback. Visuals stream separately. |
+| `browser_form_input` | `ref`, `value` | compact caption | Set a field/checkbox/dropdown. Visuals stream separately. |
+| `browser_key` | `key` | compact caption | `Enter`/`Tab`/`Escape`/`Backspace`/`Arrow*`. Visuals stream separately. |
+| `browser_scroll` | `dy` | compact caption | CSS px; positive = down. Visuals stream separately. |
+| `browser_screenshot` | — | caption + bounded image preview, or omission notice | Visual judgment only; large captures become scaled JPEGs, so click by ref. Oversized inline images never enter model context. |
 | `browser_tabs_list` | — | text: tab list | Popups/OAuth windows. **Untrusted content.** |
 | `browser_tabs_switch` | `index` \| `targetId` | read_page listing | Switch tab, then read it. |
 | `browser_upload` | `ref`, `path` | text | Attach a local file to a `<input type=file>`. |
@@ -90,6 +90,12 @@ knows one knows both.
 **Trust boundary:** every listing (`read_page`, `find`, `tabs_list`, `console`,
 `network`) is framed as untrusted web-page content — data, not instructions.
 Pass it to the model as tool output, never as a system directive.
+
+MCP output is context-safe by construction: every serialized tool result is
+hard-capped at 128 KiB, with aggregate text capped at 24 KiB and inline image
+base64 at 96 KiB. The limits cannot be raised with environment configuration.
+Drive-action visuals belong on the WS/SSE live-view surface, not in the LLM
+transcript.
 
 ## Surface 2 — WS (the live view + input)
 

@@ -41,6 +41,11 @@ paths:
         sends `Accept: text/event-stream` (MCP Streamable HTTP negotiation).
         A notification (no `id`) returns `202 Accepted` with no body.
 
+        Tool results are bounded independently of every handler: serialized
+        output cannot exceed 128 KiB, aggregate text is capped at 24 KiB, and
+        inline image base64 is capped at 96 KiB. Drive actions return compact
+        text while visual frames remain on the per-session SSE surface.
+
         The `browser_*` tool surface (from `tools/list`): `browser_open`,
         `browser_read_page`, `browser_find`, `browser_click`, `browser_form_input`,
         `browser_key`, `browser_scroll`, `browser_screenshot`, `browser_tabs_list`,

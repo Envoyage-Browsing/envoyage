@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsing onto the one process-global `--cdp-url` (or silently spawning local).
 
 ### Fixed
+- **Unbounded agent-context output**: routine browser actions no longer return
+  duplicate inline screenshots; visuals remain on the live Workshop stream.
+  Explicit screenshots become progressively compressed bounded JPEG previews
+  and are omitted above a 96 KiB base64 ceiling; aggregate text is capped at
+  24 KiB, and a handler-independent 128 KiB serialized MCP response circuit
+  breaker prevents future tools from emitting oversized context payloads. MCP
+  instructions now direct agents to AX/ref exploration, Playwright/Puppeteer
+  for repeatable verification, and human handoff for user-browser state.
 - `browser_console` now includes uncaught page exceptions reported through
   CDP's `Runtime.exceptionThrown`, so failures such as a React hydration abort
   are visible even when the page never calls `console.error`.
