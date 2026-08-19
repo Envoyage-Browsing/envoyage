@@ -390,7 +390,7 @@ fn handoff_drive_human_needed_pause_resume() {
     assert!(resumed, "after control:continue, wait_for_human should report done");
 
     // And a fresh screenshot now returns an image again (wall down, not paused).
-    let shot = http_tool(&base, sid, "browser_screenshot", json!({}));
+    let shot = http_tool(&base, sid, "browser_screenshot", json!({ "inline": true }));
     assert!(has_image(&shot), "after resume the screen returns to the model");
 }
 
@@ -464,11 +464,19 @@ fn no_screenshot_bytes_while_wall_is_up() {
     );
 
     // Now clear the wall + pause (close resets pause), reconnect with the wall
-    // down, and confirm a screenshot IS taken (guard is state-driven).
+    // down, and confirm the default call still captures nothing.
     mock.script.lock().unwrap().handoff_kind.clear();
     let _ = engine.tool("browser_close", json!({}));
     let shot = engine.tool("browser_screenshot", json!({}));
-    assert!(has_image(&shot), "with the wall down, the screen returns");
+    assert!(!has_image(&shot), "default screenshot call is text-only");
+    assert!(
+        !mock.script.lock().unwrap().screenshot_called,
+        "default screenshot call must not issue captureScreenshot"
+    );
+
+    // Only an explicit inline opt-in captures pixels.
+    let shot = engine.tool("browser_screenshot", json!({ "inline": true }));
+    assert!(has_image(&shot), "explicit inline preview returns an image");
     assert!(
         mock.script.lock().unwrap().screenshot_called,
         "captureScreenshot runs once the wall is down"
@@ -542,7 +550,7 @@ fn two_sessions_do_not_cross_talk() {
         !has_image(&b_open),
         "drive actions must not duplicate Workshop frames into agent context"
     );
-    let b_shot = http_tool(&base, "B", "browser_screenshot", json!({}));
+    let b_shot = http_tool(&base, "B", "browser_screenshot", json!({ "inline": true }));
     assert!(
         has_image(&b_shot),
         "session B must drive normally despite A being paused: {}",

@@ -74,7 +74,7 @@ knows one knows both.
 | `browser_form_input` | `ref`, `value` | compact caption | Set a field/checkbox/dropdown. Visuals stream separately. |
 | `browser_key` | `key` | compact caption | `Enter`/`Tab`/`Escape`/`Backspace`/`Arrow*`. Visuals stream separately. |
 | `browser_scroll` | `dy` | compact caption | CSS px; positive = down. Visuals stream separately. |
-| `browser_screenshot` | — | caption + bounded image preview, or omission notice | Visual judgment only; large captures become scaled JPEGs, so click by ref. Oversized inline images never enter model context. |
+| `browser_screenshot` | `inline?` (default `false`) | compact guidance, or an opt-in bounded preview | No capture occurs by default. Use `inline: true` only for pixel-level visual judgment; use Playwright first for repeatable verification. |
 | `browser_tabs_list` | — | text: tab list | Popups/OAuth windows. **Untrusted content.** |
 | `browser_tabs_switch` | `index` \| `targetId` | read_page listing | Switch tab, then read it. |
 | `browser_upload` | `ref`, `path` | text | Attach a local file to a `<input type=file>`. |

@@ -1,0 +1,41 @@
+meta {
+  name: MCP tools/call browser_screenshot (explicit inline preview)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/mcp
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+headers {
+  Content-Type: application/json
+  Mcp-Session-Id: {{sessionId}}
+}
+
+body:json {
+  {
+    "jsonrpc": "2.0",
+    "id": 6,
+    "method": "tools/call",
+    "params": {
+      "name": "browser_screenshot",
+      "arguments": {
+        "inline": true
+      }
+    }
+  }
+}
+
+docs {
+  Screenshot capture is disabled by default. The inline=true argument explicitly
+  requests one bounded preview for a genuinely visual question. Use Playwright
+  tests for repeatable functional verification and browser_read_page/browser_find
+  for compact exploratory state.
+}

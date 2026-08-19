@@ -45,6 +45,8 @@ paths:
         output cannot exceed 128 KiB, aggregate text is capped at 24 KiB, and
         inline image base64 is capped at 96 KiB. Drive actions return compact
         text while visual frames remain on the per-session SSE surface.
+        `browser_screenshot` also captures nothing by default; its bounded image
+        preview requires an explicit `inline: true` argument.
 
         The `browser_*` tool surface (from `tools/list`): `browser_open`,
         `browser_read_page`, `browser_find`, `browser_click`, `browser_form_input`,

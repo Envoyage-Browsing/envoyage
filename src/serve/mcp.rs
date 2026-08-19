@@ -132,7 +132,7 @@ pub fn handle_request(session_id: &str, req: &JsonRpcRequest) -> JsonRpcResponse
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                "instructions": "Use Envoyage for compact exploratory browser control: browser_read_page/browser_find, then act by ref. Drive actions are text-only because visual frames stream separately to the live Workshop. Call browser_screenshot only when visual judgment is necessary; it returns a bounded compressed preview. For repeatable product verification, prefer the repository's Playwright or Puppeteer tests with assertions and traces. Use human handoff for login, secrets, permissions, or user-browser state.",
+                "instructions": "For repeatable product verification, use the repository's Playwright tests first: assertions and failure-only traces are more reliable and context-efficient than screenshots. Use Envoyage for compact exploratory control: browser_read_page/browser_find, then act by ref. Drive actions are text-only because visual frames stream separately to the live Workshop. browser_screenshot captures nothing by default; only browser_screenshot {\"inline\":true} returns a bounded preview, and only for genuinely visual judgment. Puppeteer is an acceptable fallback when already used by the project. Use human handoff for login, secrets, permissions, or user-browser state.",
             })),
             ..base
         },
@@ -468,7 +468,12 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
     let mut cursor: Option<(f64, f64, CursorAction)> = None;
     let mut narration: Option<String> = None;
 
-    let include_inline_image = tool == "browser_screenshot";
+    let requested_screenshot = tool == "browser_screenshot";
+    let include_inline_image = requested_screenshot
+        && args
+            .get("inline")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let (png, title, url, handoff, cursor, narration) =
         with_browser(session_id, launch_url, |b| {
             match tool {
@@ -609,6 +614,10 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
         "type": "text",
         "text": if include_inline_image {
             format!("🌐 {title} — {url}")
+        } else if requested_screenshot {
+            format!(
+                "🌐 {title} — {url}\nNo screenshot was captured or inserted into agent context. Use browser_read_page/browser_find or Playwright for functional verification. Only call browser_screenshot with inline=true when pixel-level visual judgment is genuinely necessary."
+            )
         } else {
             format!(
                 "🌐 {title} — {url}\nVisual update streamed to the live Workshop; no screenshot was inserted into agent context. Use browser_read_page or browser_find for compact page state."
