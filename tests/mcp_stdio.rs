@@ -50,6 +50,10 @@ fn initialize_and_list_tools() {
     // Handshake identifies the server as envoyage.
     assert_eq!(resps[0]["result"]["serverInfo"]["name"], "envoyage");
     assert!(resps[0]["result"]["capabilities"]["tools"].is_object());
+    let instructions = resps[0]["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("browser_read_page/browser_find"));
+    assert!(instructions.contains("Playwright or Puppeteer"));
+    assert!(instructions.contains("bounded compressed preview"));
 
     // Every tool is neutrally named by its Envoyage capability (no consumer
     // product prefix such as `immorterm_` or `flam_` may leak here).

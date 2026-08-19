@@ -32,3 +32,9 @@ body:json {
     }
   }
 }
+
+docs {
+  browser_open returns compact text only. Visual frames are delivered through
+  the per-session events stream and are not duplicated into agent context.
+  Every MCP tool response is subject to Envoyage's hard 128 KiB ceiling.
+}

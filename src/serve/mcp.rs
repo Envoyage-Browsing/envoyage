@@ -12,12 +12,22 @@ use super::state;
 use crate::browser;
 use crate::crawl::{self, CrawlRequest};
 use crate::protocol::{Cursor, CursorAction, HumanRequest, Narration, State};
+use base64::Engine as _;
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "envoyage";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Hard ceilings for anything that can enter an agent's context through MCP.
+/// These are deliberately not configurable: a consumer must never be able to
+/// turn a browser response into an unbounded context payload by accident.
+const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
+const MAX_INLINE_IMAGE_BASE64_BYTES: usize = 96 * 1024;
+const MAX_TEXT_CONTENT_BYTES: usize = 24 * 1024;
 
 // ─── JSON-RPC 2.0 types ─────────────────────────────────────────────
 
@@ -122,6 +132,7 @@ pub fn handle_request(session_id: &str, req: &JsonRpcRequest) -> JsonRpcResponse
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                "instructions": "Use Envoyage for compact exploratory browser control: browser_read_page/browser_find, then act by ref. Drive actions are text-only because visual frames stream separately to the live Workshop. Call browser_screenshot only when visual judgment is necessary; it returns a bounded compressed preview. For repeatable product verification, prefer the repository's Playwright or Puppeteer tests with assertions and traces. Use human handoff for login, secrets, permissions, or user-browser state.",
             })),
             ..base
         },
@@ -129,7 +140,14 @@ pub fn handle_request(session_id: &str, req: &JsonRpcRequest) -> JsonRpcResponse
             result: Some(json!({ "tools": tool_defs() })),
             ..base
         },
-        "tools/call" => call_tool(session_id, &req.params, base),
+        "tools/call" => {
+            let tool_name = req
+                .params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            enforce_tool_response_budget(call_tool(session_id, &req.params, base), tool_name)
+        }
         other => JsonRpcResponse {
             error: Some(JsonRpcError {
                 code: -32601,
@@ -239,6 +257,102 @@ fn error_content(base: JsonRpcResponse, e: &str) -> JsonRpcResponse {
     }
 }
 
+/// Final, handler-independent circuit breaker for MCP tool output.
+///
+/// Individual handlers should still return compact results, but this guard is
+/// intentionally applied after dispatch so a future tool cannot accidentally
+/// reintroduce multi-megabyte context payloads.
+fn enforce_tool_response_budget(
+    mut response: JsonRpcResponse,
+    tool_name: &str,
+) -> JsonRpcResponse {
+    let mut omitted_images = 0usize;
+    let mut truncated_text_bytes = 0usize;
+
+    if let Some(content) = response
+        .result
+        .as_mut()
+        .and_then(|result| result.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    {
+        let mut remaining_text = MAX_TEXT_CONTENT_BYTES;
+        let mut bounded = Vec::with_capacity(content.len() + 1);
+
+        for item in content.drain(..) {
+            match item.get("type").and_then(Value::as_str) {
+                Some("image") => {
+                    let image_bytes = item
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .map(str::len)
+                        .unwrap_or(0);
+                    if image_bytes <= MAX_INLINE_IMAGE_BASE64_BYTES {
+                        bounded.push(item);
+                    } else {
+                        omitted_images += 1;
+                    }
+                }
+                Some("text") => {
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                    let keep = text.len().min(remaining_text);
+                    let prefix = utf8_prefix(text, keep);
+                    truncated_text_bytes += text.len().saturating_sub(prefix.len());
+                    remaining_text = remaining_text.saturating_sub(prefix.len());
+                    if !prefix.is_empty() {
+                        bounded.push(json!({ "type": "text", "text": prefix }));
+                    }
+                }
+                _ => bounded.push(item),
+            }
+        }
+
+        if omitted_images > 0 || truncated_text_bytes > 0 {
+            bounded.push(json!({
+                "type": "text",
+                "text": format!(
+                    "⚠️ Envoyage context guard: omitted {omitted_images} oversized image(s) and truncated {truncated_text_bytes} text byte(s). The live Workshop view remains available; use browser_read_page/browser_find for compact page state."
+                )
+            }));
+        }
+        *content = bounded;
+    }
+
+    let serialized_len = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX);
+    if serialized_len > MAX_TOOL_RESULT_BYTES {
+        response.result = Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "⚠️ Envoyage suppressed the {tool_name} result because its serialized payload was {serialized_len} bytes, above the hard {MAX_TOOL_RESULT_BYTES}-byte agent-context ceiling. Narrow the request or use the live Workshop view."
+                )
+            }],
+            "isError": true,
+        }));
+        response.error = None;
+    }
+
+    debug_assert!(
+        serde_json::to_vec(&response)
+            .map(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
+            .unwrap_or(false),
+        "bounded MCP response still exceeds the hard ceiling"
+    );
+    response
+}
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 // ─── Panel event emitters (broadcast to WS clients) ─────────────────
 
 const PAUSED_SCREEN_PLACEHOLDER: &str =
@@ -293,8 +407,49 @@ fn hand_off_to_human(session_id: &str, reason: &str, instructions: Option<&str>)
     )
 }
 
-fn png_image_content(png_base64: &str) -> Value {
-    json!({ "type": "image", "data": png_base64, "mimeType": "image/png" })
+fn bounded_screenshot_content(png_base64: &str) -> Result<Value, String> {
+    if png_base64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+        return Ok(json!({
+            "type": "image",
+            "data": png_base64,
+            "mimeType": "image/png",
+        }));
+    }
+
+    let source = base64::engine::general_purpose::STANDARD
+        .decode(png_base64)
+        .map_err(|error| format!("decode screenshot for bounded preview: {error}"))?;
+    let image = image::load_from_memory(&source)
+        .map_err(|error| format!("decode screenshot pixels for bounded preview: {error}"))?;
+    let source_width = image.width().max(1);
+    let source_height = image.height().max(1);
+
+    // Reuse one decoded source while progressively lowering preview cost. The
+    // final serialized-response guard remains authoritative for every handler.
+    const CANDIDATES: &[(u32, u8)] = &[(768, 55), (640, 45), (512, 35), (384, 25)];
+    for (max_width, quality) in CANDIDATES {
+        let width = source_width.min(*max_width);
+        let height = ((source_height as u64 * width as u64) / source_width as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        let preview = image.resize(width, height, FilterType::Triangle).to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, *quality)
+            .encode_image(&preview)
+            .map_err(|error| format!("encode bounded screenshot preview: {error}"))?;
+        let data = base64::engine::general_purpose::STANDARD.encode(encoded);
+        if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+            return Ok(json!({
+                "type": "image",
+                "data": data,
+                "mimeType": "image/jpeg",
+            }));
+        }
+    }
+
+    Err(format!(
+        "screenshot preview remains above the hard {MAX_INLINE_IMAGE_BASE64_BYTES}-byte inline-image ceiling"
+    ))
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────
@@ -313,6 +468,7 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
     let mut cursor: Option<(f64, f64, CursorAction)> = None;
     let mut narration: Option<String> = None;
 
+    let include_inline_image = tool == "browser_screenshot";
     let (png, title, url, handoff, cursor, narration) =
         with_browser(session_id, launch_url, |b| {
             match tool {
@@ -410,10 +566,13 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                 None
             };
             let (title, url) = b.current_title_url();
-            let png = if handoff.is_some() || state::is_paused(session_id) {
-                String::new()
+            let png = if handoff.is_some()
+                || state::is_paused(session_id)
+                || !include_inline_image
+            {
+                None
             } else {
-                b.screenshot()?
+                Some(b.screenshot()?)
             };
             Ok((png, title, url, handoff, cursor, narration))
         })?;
@@ -446,10 +605,28 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
         })]);
     }
 
-    Ok(vec![
-        json!({ "type": "text", "text": format!("🌐 {title} — {url}") }),
-        png_image_content(&png),
-    ])
+    let mut content = vec![json!({
+        "type": "text",
+        "text": if include_inline_image {
+            format!("🌐 {title} — {url}")
+        } else {
+            format!(
+                "🌐 {title} — {url}\nVisual update streamed to the live Workshop; no screenshot was inserted into agent context. Use browser_read_page or browser_find for compact page state."
+            )
+        },
+    })];
+    if let Some(png) = png {
+        match bounded_screenshot_content(&png) {
+            Ok(image) => content.push(image),
+            Err(error) => content.push(json!({
+                "type": "text",
+                "text": format!(
+                    "⚠️ Envoyage context guard omitted this screenshot: {error}. Use the live Workshop, browser_read_page, or browser_find."
+                ),
+            })),
+        }
+    }
+    Ok(content)
 }
 
 /// Brief pause after an interaction so the page can react before screenshot.
@@ -756,3 +933,94 @@ fn render_log(kind: &str, lines: &[String]) -> String {
 
 // ─── Tool definitions (schemas mirror ImmorTerm's, names neutralized) ─
 include!("tool_defs.rs");
+
+#[cfg(test)]
+mod context_budget_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn response_with_content(content: Vec<Value>) -> JsonRpcResponse {
+        JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            result: Some(json!({ "content": content })),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn oversized_inline_image_is_omitted() {
+        let response = response_with_content(vec![
+            json!({ "type": "text", "text": "caption" }),
+            json!({
+                "type": "image",
+                "data": "A".repeat(MAX_INLINE_IMAGE_BASE64_BYTES + 1),
+                "mimeType": "image/png"
+            }),
+        ]);
+        let bounded = enforce_tool_response_budget(response, "browser_screenshot");
+        let content = bounded.result.unwrap()["content"].as_array().unwrap().clone();
+
+        assert!(!content.iter().any(|item| item["type"] == "image"));
+        assert!(content.iter().any(|item| {
+            item["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("omitted 1 oversized image"))
+        }));
+    }
+
+    #[test]
+    fn large_png_becomes_a_bounded_jpeg_preview() {
+        let pixels = image::RgbImage::from_fn(1024, 768, |x, y| {
+            let seed = x
+                .wrapping_mul(1_664_525)
+                .wrapping_add(y.wrapping_mul(1_013_904_223));
+            image::Rgb([
+                (seed & 0xff) as u8,
+                ((seed >> 8) & 0xff) as u8,
+                ((seed >> 16) & 0xff) as u8,
+            ])
+        });
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(pixels)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode(encoded.into_inner());
+        assert!(png.len() > MAX_INLINE_IMAGE_BASE64_BYTES);
+
+        let preview = bounded_screenshot_content(&png).unwrap();
+        assert_eq!(preview["mimeType"], "image/jpeg");
+        assert!(
+            preview["data"].as_str().unwrap().len() <= MAX_INLINE_IMAGE_BASE64_BYTES,
+            "preview must fit the hard inline-image ceiling"
+        );
+    }
+
+    #[test]
+    fn huge_text_is_utf8_safely_truncated() {
+        let original = "🦎".repeat(MAX_TEXT_CONTENT_BYTES);
+        let response = response_with_content(vec![json!({ "type": "text", "text": original })]);
+        let bounded = enforce_tool_response_budget(response, "browser_read_page");
+        let encoded = serde_json::to_vec(&bounded).unwrap();
+        let text = bounded.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(encoded.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(text.is_char_boundary(text.len()));
+        assert!(text.len() <= MAX_TEXT_CONTENT_BYTES);
+    }
+
+    #[test]
+    fn final_serialized_ceiling_catches_future_unbounded_shapes() {
+        let mut response = response_with_content(vec![]);
+        response.result.as_mut().unwrap()["future_unbounded_field"] =
+            json!("x".repeat(MAX_TOOL_RESULT_BYTES * 2));
+        let bounded = enforce_tool_response_budget(response, "future_tool");
+        let encoded = serde_json::to_vec(&bounded).unwrap();
+
+        assert!(encoded.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(bounded.result.unwrap()["isError"].as_bool().unwrap());
+    }
+}

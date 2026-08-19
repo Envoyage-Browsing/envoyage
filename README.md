@@ -88,14 +88,14 @@ ImmorTerm's set, so a model that knows one knows both.
 
 | Tool | What it does |
 |------|--------------|
-| `browser_open` | Open/reuse the browser and navigate. Returns caption + PNG. |
+| `browser_open` | Open/reuse the browser and navigate. Compact caption; visuals stay in the live Workshop. |
 | `browser_read_page` | AX listing of the page as `[ref_N] role "name"` handles. |
 | `browser_find` | Ranked search for elements, same ref shape. |
-| `browser_click` | Click by `ref` (preferred) or `x`/`y`. |
-| `browser_form_input` | Set a field/checkbox/dropdown by `ref`. |
-| `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*. |
-| `browser_scroll` | Scroll by `dy` CSS pixels. |
-| `browser_screenshot` | Fresh CSS-pixel-accurate PNG. |
+| `browser_click` | Click by `ref` (preferred) or `x`/`y`; returns text only. |
+| `browser_form_input` | Set a field/checkbox/dropdown by `ref`; returns text only. |
+| `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*; returns text only. |
+| `browser_scroll` | Scroll by `dy` CSS pixels; returns text only. |
+| `browser_screenshot` | Explicit bounded image preview for genuinely visual questions; large captures become scaled JPEGs. |
 | `browser_tabs_list` / `browser_tabs_switch` | Multi-tab / popup handling. |
 | `browser_upload` | Attach a local file to a file input by `ref`. |
 | `browser_console` / `browser_network` | Recent console + network entries. |
@@ -107,6 +107,18 @@ ImmorTerm's set, so a model that knows one knows both.
 
 Page content (listings, tabs, console, network) is framed as **untrusted** —
 data, not instructions.
+
+Every MCP tool result has a non-configurable 128 KiB serialized ceiling. Text
+is capped at 24 KiB and inline screenshot base64 at 96 KiB. Oversized content
+is visibly omitted or truncated with guidance to use `browser_read_page`,
+`browser_find`, or the live Workshop. Routine drive actions never duplicate
+the Workshop frame into model context.
+
+Agent workflow is stated directly in MCP initialization and tool descriptions:
+use Envoyage's AX/ref surface for exploratory control, request a bounded preview
+only for visual judgment, prefer project Playwright/Puppeteer tests for
+deterministic verification, and use human handoff for credentials or
+user-browser state.
 
 ## Bounded website crawling
 

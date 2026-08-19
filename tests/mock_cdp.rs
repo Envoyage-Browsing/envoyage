@@ -534,14 +534,19 @@ fn two_sessions_do_not_cross_talk() {
     let a_open = http_tool(&base, "A", "browser_open", json!({ "url": "https://x.test/" }));
     assert!(text_of(&a_open).contains("Human needed"), "session A hits the wall");
 
-    // Phase 2: wall DOWN. Session B drives cleanly and MUST get an image — proof
-    // A's pause did not bleed into B (per-session pause map).
+    // Phase 2: wall DOWN. Session B drives cleanly and can explicitly request
+    // an image — proof A's pause did not bleed into B (per-session pause map).
     mock.script.lock().unwrap().handoff_kind.clear();
     let b_open = http_tool(&base, "B", "browser_open", json!({ "url": "https://x.test/" }));
     assert!(
-        has_image(&b_open),
+        !has_image(&b_open),
+        "drive actions must not duplicate Workshop frames into agent context"
+    );
+    let b_shot = http_tool(&base, "B", "browser_screenshot", json!({}));
+    assert!(
+        has_image(&b_shot),
         "session B must drive normally despite A being paused: {}",
-        text_of(&b_open)
+        text_of(&b_shot)
     );
 
     // And A is still paused (its wait_for_human still waits) while B never was.
