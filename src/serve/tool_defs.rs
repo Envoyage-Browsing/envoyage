@@ -162,8 +162,14 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "browser_screenshot",
-            "description": "Request an explicit bounded image preview only when visual judgment is necessary (layout, styling, canvas, or image output). Do not use screenshots for routine navigation or functional assertions; use browser_read_page/browser_find or the project's Playwright/Puppeteer tests. Large captures become compressed JPEG previews and may be scaled, so click by ref rather than preview coordinates. Oversized image data is omitted instead of entering agent context.",
-            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            "description": "Screenshot capture is OFF by default. A call without inline=true returns compact guidance and does not issue Page.captureScreenshot. Set inline=true only when pixel-level visual judgment is genuinely necessary (layout, styling, canvas, or image output); the result is a bounded compressed preview. For routine navigation use browser_read_page/browser_find, and for product verification use Playwright tests first (Puppeteer is an acceptable project-specific fallback). Oversized image data is omitted instead of entering agent context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inline": { "type": "boolean", "description": "Opt in to one bounded inline preview. Defaults to false, which captures and returns no image." }
+                },
+                "required": []
+            }
         }),
         json!({
             "name": "browser_tabs_list",

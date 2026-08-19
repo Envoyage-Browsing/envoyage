@@ -41,7 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Unbounded agent-context output**: routine browser actions no longer return
   duplicate inline screenshots; visuals remain on the live Workshop stream.
-  Explicit screenshots become progressively compressed bounded JPEG previews
+  Screenshot capture is now opt-in via `inline: true`; the default call captures
+  and returns no pixels. Explicit screenshots become compressed bounded previews
   and are omitted above a 96 KiB base64 ceiling; aggregate text is capped at
   24 KiB, and a handler-independent 128 KiB serialized MCP response circuit
   breaker prevents future tools from emitting oversized context payloads. MCP

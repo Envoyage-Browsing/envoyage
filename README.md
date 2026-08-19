@@ -95,7 +95,7 @@ ImmorTerm's set, so a model that knows one knows both.
 | `browser_form_input` | Set a field/checkbox/dropdown by `ref`; returns text only. |
 | `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*; returns text only. |
 | `browser_scroll` | Scroll by `dy` CSS pixels; returns text only. |
-| `browser_screenshot` | Explicit bounded image preview for genuinely visual questions; large captures become scaled JPEGs. |
+| `browser_screenshot` | Captures nothing by default. Set `inline: true` only for genuinely visual questions; the opt-in preview is strictly bounded. |
 | `browser_tabs_list` / `browser_tabs_switch` | Multi-tab / popup handling. |
 | `browser_upload` | Attach a local file to a file input by `ref`. |
 | `browser_console` / `browser_network` | Recent console + network entries. |

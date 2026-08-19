@@ -52,8 +52,8 @@ fn initialize_and_list_tools() {
     assert!(resps[0]["result"]["capabilities"]["tools"].is_object());
     let instructions = resps[0]["result"]["instructions"].as_str().unwrap();
     assert!(instructions.contains("browser_read_page/browser_find"));
-    assert!(instructions.contains("Playwright or Puppeteer"));
-    assert!(instructions.contains("bounded compressed preview"));
+    assert!(instructions.contains("Playwright tests first"));
+    assert!(instructions.contains("captures nothing by default"));
 
     // Every tool is neutrally named by its Envoyage capability (no consumer
     // product prefix such as `immorterm_` or `flam_` may leak here).
@@ -81,6 +81,18 @@ fn initialize_and_list_tools() {
     ] {
         assert!(names.contains(&expected), "missing {expected}");
     }
+    let screenshot = tools
+        .iter()
+        .find(|tool| tool["name"] == "browser_screenshot")
+        .expect("browser_screenshot definition");
+    assert_eq!(
+        screenshot["inputSchema"]["properties"]["inline"]["type"],
+        "boolean"
+    );
+    assert!(screenshot["description"]
+        .as_str()
+        .unwrap()
+        .contains("OFF by default"));
     // eval is gated OFF by default.
     assert!(!names.contains(&"browser_eval"));
 }
