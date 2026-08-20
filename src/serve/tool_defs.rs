@@ -190,8 +190,20 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "browser_close",
-            "description": "Close envoyage's self-driven browser — kills the exact browser process it spawned and clears state. The next browser_open launches a fresh one. Never touches the user's normal browser.",
+            "description": "Close envoyage's self-driven browser — kills the exact browser process it spawned and clears in-memory state. The next browser_open launches a fresh process with the same signed-in persistent profile. It does not clear cookies or site storage; use browser_reload for deterministic fresh assets. Never touches the user's normal browser.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }),
+        json!({
+            "name": "browser_reload",
+            "description": "Reload the active page. Defaults to a deterministic hard reload: disables and clears Chromium's HTTP cache, bypasses service workers, and reloads from the network while preserving cookies, login state, and site storage. Set hard=false only when intentionally testing normal browser-cache/service-worker behavior. Returns compact text; the visual update streams to the live Workshop.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "hard": { "type": "boolean", "default": true, "description": "true (default) fetches fresh assets while preserving authentication; false performs a normal reload." }
+                },
+                "required": []
+            }
         }),
         json!({
             "name": "browser_request_human",

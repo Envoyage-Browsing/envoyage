@@ -193,6 +193,7 @@ fn call_tool(session_id: &str, params: &Value, base: JsonRpcResponse) -> JsonRpc
         "browser_find" => handle_find(session_id, &arguments),
         "browser_tabs_list" => handle_tabs_list(session_id),
         "browser_tabs_switch" => handle_tabs_switch(session_id, &arguments),
+        "browser_reload" => handle_reload(session_id, &arguments),
         "browser_eval" => handle_eval(session_id, &arguments),
         "browser_close" => handle_close(session_id),
         "browser_request_human" => handle_request_human(session_id, &arguments),
@@ -636,6 +637,22 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
         }
     }
     Ok(content)
+}
+
+fn handle_reload(session_id: &str, args: &Value) -> Result<String, String> {
+    let hard = args.get("hard").and_then(Value::as_bool).unwrap_or(true);
+    with_browser(session_id, None, |b| {
+        b.reload(hard)?;
+        let (title, url) = b.current_title_url();
+        Ok(format!(
+            "Reloaded {title} — {url} ({})\nVisual update streamed to the live Workshop; use browser_read_page or browser_find for compact page state.",
+            if hard {
+                "HTTP cache cleared; cache disabled; service worker bypassed"
+            } else {
+                "normal reload"
+            }
+        ))
+    })
 }
 
 /// Brief pause after an interaction so the page can react before screenshot.

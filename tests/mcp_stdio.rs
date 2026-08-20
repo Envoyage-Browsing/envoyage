@@ -74,6 +74,7 @@ fn initialize_and_list_tools() {
         "crawl_read",
         "crawl_cancel",
         "browser_open",
+        "browser_reload",
         "browser_read_page",
         "browser_click",
         "browser_request_human",

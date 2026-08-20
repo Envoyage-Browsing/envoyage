@@ -53,6 +53,10 @@ struct MockScript {
     last_activated: String,
     attach_count: usize,
     detach_count: usize,
+    cache_disabled: bool,
+    service_worker_bypassed: bool,
+    browser_cache_cleared: bool,
+    reload_ignored_cache: bool,
     /// When set, the next `Input.dispatchMouseEvent` "opens" this popup: the
     /// mock appends it to `targets` so it's a target that appeared AFTER the
     /// click (exactly what follow_new_target diffs for). `(id, title, url)`.
@@ -165,7 +169,7 @@ where
 
         // A navigate blocks in the engine until Page.loadEventFired; emit it so
         // navigate() returns promptly instead of waiting out LOAD_TIMEOUT.
-        if method == "Page.navigate" {
+        if method == "Page.navigate" || method == "Page.reload" {
             let ev = json!({ "method": "Page.loadEventFired", "params": {} });
             let _ = sink.send(Message::Text(ev.to_string())).await;
         }
@@ -211,6 +215,31 @@ fn reply_for(method: &str, params: &Value, script: &SharedScript) -> Value {
         }
         "Target.detachFromTarget" => {
             s.detach_count += 1;
+            json!({})
+        }
+        "Network.setCacheDisabled" => {
+            s.cache_disabled = params
+                .get("cacheDisabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            json!({})
+        }
+        "Network.setBypassServiceWorker" => {
+            s.service_worker_bypassed = params
+                .get("bypass")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            json!({})
+        }
+        "Network.clearBrowserCache" => {
+            s.browser_cache_cleared = true;
+            json!({})
+        }
+        "Page.reload" => {
+            s.reload_ignored_cache = params
+                .get("ignoreCache")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             json!({})
         }
         "Page.captureScreenshot" => {
@@ -358,6 +387,46 @@ fn text_of(result: &Value) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+#[test]
+fn hard_reload_fetches_fresh_assets_without_replacing_the_profile() {
+    let mock = MockCdp::start(MockScript::page(
+        "t1",
+        "Factory",
+        "http://web.flam.localhost:1355/factory",
+        "",
+    ));
+    let mut engine = Engine::spawn_mcp(&mock.url);
+
+    let _ = engine.tool(
+        "browser_open",
+        json!({ "url": "http://web.flam.localhost:1355/factory" }),
+    );
+    assert!(
+        mock.script.lock().unwrap().cache_disabled,
+        "page attach must disable Chromium's HTTP cache"
+    );
+
+    let reloaded = engine.tool("browser_reload", json!({}));
+    assert!(text_of(&reloaded).contains("service worker bypassed"));
+    let state = mock.script.lock().unwrap();
+    assert!(
+        state.cache_disabled,
+        "hard reload keeps HTTP cache disabled"
+    );
+    assert!(
+        state.service_worker_bypassed,
+        "hard reload bypasses service workers"
+    );
+    assert!(
+        state.browser_cache_cleared,
+        "hard reload clears stale HTTP assets"
+    );
+    assert!(
+        state.reload_ignored_cache,
+        "Page.reload must set ignoreCache=true"
+    );
 }
 
 /// Whether a tool result carries any `image` content part.
