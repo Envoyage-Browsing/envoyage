@@ -512,6 +512,12 @@ impl BrowserSession {
         let _ = self.cdp("Runtime.enable", json!({}));
         let _ = self.cdp("Log.enable", json!({}));
         let _ = self.cdp("Network.enable", json!({}));
+        // Envoyage is an agent-first test browser. Keep the persistent profile
+        // for authenticated sessions, but do not let its HTTP cache preserve
+        // stale development assets across browser_close/browser_open cycles.
+        // Service workers are bypassed only by an explicit hard reload below,
+        // because always bypassing them would change normal product behavior.
+        let _ = self.cdp("Network.setCacheDisabled", json!({ "cacheDisabled": true }));
         // Anti-detection: strip the HeadlessChrome UA and install the stealth
         // pre-load script. Runs here so BOTH the local (launch) and remote
         // (connect/Cloudflare) paths get it, and every followed popup/new tab
@@ -739,6 +745,27 @@ impl BrowserSession {
         check_scheme(url)?;
         self.clear_refs();
         self.cdp("Page.navigate", json!({ "url": url }))?;
+        self.wait_for_load();
+        Ok(())
+    }
+
+    /// Reload the active page from the network without discarding the signed-in
+    /// persistent profile. A hard reload also bypasses service workers and
+    /// clears Chromium's HTTP cache, but deliberately preserves cookies and
+    /// site storage so human-authenticated sessions survive.
+    pub fn reload(&mut self, hard: bool) -> Result<(), String> {
+        self.clear_refs();
+        if hard {
+            self.cdp("Network.setCacheDisabled", json!({ "cacheDisabled": true }))?;
+            self.cdp("Network.setBypassServiceWorker", json!({ "bypass": true }))?;
+            self.cdp("Network.clearBrowserCache", json!({}))?;
+        }
+        self.cdp("Page.reload", json!({ "ignoreCache": hard }))?;
+        self.wait_for_load();
+        Ok(())
+    }
+
+    fn wait_for_load(&mut self) {
         // Best-effort wait for the load event, bounded so SPA pages don't hang.
         let deadline = Instant::now() + LOAD_TIMEOUT;
         while let Ok(Some(frame)) = self.transport.next_frame(deadline) {
@@ -751,7 +778,6 @@ impl BrowserSession {
                 self.capture_cdp_event(&v);
             }
         }
-        Ok(())
     }
 
     // ── Retina / CSS-pixel screenshot ────────────────────────────────
