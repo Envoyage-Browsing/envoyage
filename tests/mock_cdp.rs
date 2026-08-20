@@ -48,6 +48,11 @@ struct MockScript {
     screenshot_called: bool,
     /// The `targetId` the engine most recently attached to (proves tab-follow).
     last_attached: String,
+    /// Target lifecycle telemetry: switching must activate the selected page,
+    /// detach the old flattened session, and avoid duplicate attachments.
+    last_activated: String,
+    attach_count: usize,
+    detach_count: usize,
     /// When set, the next `Input.dispatchMouseEvent` "opens" this popup: the
     /// mock appends it to `targets` so it's a target that appeared AFTER the
     /// click (exactly what follow_new_target diffs for). `(id, title, url)`.
@@ -195,7 +200,18 @@ fn reply_for(method: &str, params: &Value, script: &SharedScript) -> Value {
             if let Some(tid) = params.get("targetId").and_then(|x| x.as_str()) {
                 s.last_attached = tid.to_string();
             }
+            s.attach_count += 1;
             json!({ "sessionId": "mock-session" })
+        }
+        "Target.activateTarget" => {
+            if let Some(tid) = params.get("targetId").and_then(|x| x.as_str()) {
+                s.last_activated = tid.to_string();
+            }
+            json!({})
+        }
+        "Target.detachFromTarget" => {
+            s.detach_count += 1;
+            json!({})
         }
         "Page.captureScreenshot" => {
             s.screenshot_called = true;
@@ -430,6 +446,60 @@ fn drive_follows_a_new_tab() {
     assert_eq!(
         mock.script.lock().unwrap().last_attached, "popup",
         "the engine must follow the newly-opened tab for driving"
+    );
+    let script = mock.script.lock().unwrap();
+    assert_eq!(
+        script.last_activated, "popup",
+        "the followed popup must also become Chrome's foreground target"
+    );
+    assert_eq!(
+        script.detach_count, 1,
+        "following a popup must detach the opener's CDP session"
+    );
+    assert_eq!(
+        script.attach_count, 2,
+        "one opener attachment plus one popup attachment"
+    );
+}
+
+#[test]
+fn tab_switch_reuses_current_attachment_and_replaces_it_once_for_another_target() {
+    let mock = MockCdp::start(MockScript::page("opener", "Home", "https://site.test/", ""));
+    let mut engine = Engine::spawn_mcp(&mock.url);
+
+    engine.tool("browser_open", json!({ "url": "https://site.test/" }));
+    mock.script.lock().unwrap().targets.push((
+        "settings".into(),
+        "Settings".into(),
+        "chrome://settings/help".into(),
+    ));
+    engine.tool("browser_tabs_switch", json!({ "targetId": "opener" }));
+    {
+        let state = mock.script.lock().unwrap();
+        assert_eq!(
+            state.attach_count, 1,
+            "re-selecting the current target must reuse its attachment"
+        );
+        assert_eq!(
+            state.detach_count, 0,
+            "re-selecting the current target must not detach it"
+        );
+        assert_eq!(state.last_activated, "opener");
+    }
+
+    engine.tool("browser_tabs_switch", json!({ "targetId": "settings" }));
+    let state = mock.script.lock().unwrap();
+    assert_eq!(
+        state.attach_count, 2,
+        "switching targets creates exactly one replacement attachment"
+    );
+    assert_eq!(
+        state.detach_count, 1,
+        "switching targets detaches exactly one old session"
+    );
+    assert_eq!(
+        state.last_activated, "settings",
+        "the selected target must be foregrounded"
     );
 }
 

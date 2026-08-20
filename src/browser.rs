@@ -444,7 +444,7 @@ impl BrowserSession {
     /// All live page targets as `(targetId, title, url)`, browser-level order
     /// (newest last, which is where popups/new tabs land).
     fn page_targets(&mut self) -> Result<Vec<(String, String, String)>, String> {
-        let targets = self.cdp("Target.getTargets", json!({}))?;
+        let targets = self.cdp_browser("Target.getTargets", json!({}))?;
         let arr = targets.get("targetInfos").and_then(|v| v.as_array());
         Ok(arr
             .into_iter()
@@ -464,7 +464,31 @@ impl BrowserSession {
 
     /// Attach to a specific page target and re-pin the routing session_id.
     fn attach_target(&mut self, target_id: &str) -> Result<(), String> {
-        let res = self.cdp(
+        // Re-selecting the current page must not create another flattened CDP
+        // attachment. Each attachment can own a Page screencast; leaking them
+        // floods the shared pipe with stale frames and can starve input replies.
+        if self.target_id.as_deref() == Some(target_id) && self.session_id.is_some() {
+            self.activate_target(target_id)?;
+            return Ok(());
+        }
+
+        // A flattened attachment remains alive until explicitly detached. Drop
+        // the old route before selecting another page so tab switches cannot
+        // accumulate background screencasts and event streams.
+        if self.screencast_on {
+            let _ = self.cdp_fire("Page.stopScreencast", json!({}));
+        }
+        if let Some(old_session_id) = self.session_id.take() {
+            self.target_id = None;
+            self.screencast_on = false;
+            self.pending_screencast.clear();
+            let _ = self.cdp_browser(
+                "Target.detachFromTarget",
+                json!({ "sessionId": old_session_id }),
+            );
+        }
+
+        let res = self.cdp_browser(
             "Target.attachToTarget",
             json!({ "targetId": target_id, "flatten": true }),
         )?;
@@ -475,6 +499,7 @@ impl BrowserSession {
             .to_string();
         self.session_id = Some(sid);
         self.target_id = Some(target_id.to_string());
+        self.activate_target(target_id)?;
         self.clear_refs(); // refs belonged to the previous target
         // Screencast is bound to the previous page session — it's gone now.
         // The pump re-arms it on the new target via `ensure_screencast`.
@@ -498,6 +523,18 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Keep Envoyage's pinned CDP route and Chrome's foreground page aligned.
+    /// Attaching alone does not select the visible tab, which can leave keyboard
+    /// input driving a different page than the live view implies.
+    fn activate_target(&mut self, target_id: &str) -> Result<(), String> {
+        self.cdp_browser(
+            "Target.activateTarget",
+            json!({ "targetId": target_id }),
+        )?;
+        self.cdp("Page.bringToFront", json!({}))?;
+        Ok(())
+    }
+
     /// Apply the anti-detection layer to the just-attached page session:
     /// (1) `Network.setUserAgentOverride` with a "Headless"-stripped UA + matching
     /// `userAgentMetadata` (idempotent, re-applied every attach), and (2) a
@@ -507,7 +544,7 @@ impl BrowserSession {
     /// [`crate::stealth`] for the (deliberately narrow) rationale.
     fn apply_stealth(&mut self, target_id: &str) {
         // UA override, derived from the live binary so it can never drift.
-        if let Ok(ver) = self.cdp("Browser.getVersion", json!({})) {
+        if let Ok(ver) = self.cdp_browser("Browser.getVersion", json!({})) {
             let product = ver.get("product").and_then(|v| v.as_str()).unwrap_or("");
             let raw_ua = ver.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
             if !product.is_empty() && !raw_ua.is_empty() {
@@ -619,13 +656,30 @@ impl BrowserSession {
     /// Send one CDP command (`\0`-terminated JSON) and block until its matching
     /// reply arrives, discarding intervening events. Returns `result`.
     fn cdp(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let session_id = self.session_id.clone();
+        self.cdp_routed(method, params, session_id.as_deref())
+    }
+
+    /// Send a command to the browser target, never the currently attached page.
+    /// Target discovery/attachment/activation live at this level and must not be
+    /// accidentally routed through the page session being replaced.
+    fn cdp_browser(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.cdp_routed(method, params, None)
+    }
+
+    fn cdp_routed(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+    ) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
         let mut msg = json!({ "id": id, "method": method, "params": params });
         // Flattened routing: once attached, tag commands with the page session
         // id so they reach the page target. Target.* handshake runs before this
         // is set and stays browser-level.
-        if let Some(sid) = &self.session_id {
+        if let Some(sid) = session_id {
             msg["sessionId"] = json!(sid);
         }
         // Serialize WITHOUT framing — the transport adds a NUL (pipe) or wraps
