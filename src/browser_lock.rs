@@ -90,6 +90,11 @@ pub fn decide(lock: Option<&BrowserLock>, self_pid: u32) -> Decision {
     match lock {
         None => Decision::Own,
         Some(l) if l.owner_pid == self_pid => Decision::AlreadyOwn,
+        // A long-lived broker may reserve the lock before any browser exists.
+        // That reservation coordinates broker startup, but it is not browser
+        // ownership: the first process that launches a real browser must still
+        // be allowed to replace it with a lock carrying the exact browser PID.
+        Some(l) if l.browser_pid == 0 => Decision::Own,
         Some(l) if pid_alive(l.owner_pid) => Decision::RouteTo {
             owner_pid: l.owner_pid,
             owner_ws_port: l.owner_ws_port,
@@ -193,6 +198,16 @@ mod tests {
     #[test]
     fn self_owned_lock_means_already_own() {
         assert_eq!(decide(Some(&mk(100)), 100), Decision::AlreadyOwn);
+    }
+
+    #[test]
+    fn live_service_reservation_without_browser_does_not_block_launch() {
+        let me = std::process::id();
+        let mut lock = mk(me);
+        lock.browser_pid = 0;
+        lock.launch_nonce = format!("service-{me}");
+
+        assert_eq!(decide(Some(&lock), me + 1_000_000), Decision::Own);
     }
 
     #[test]
