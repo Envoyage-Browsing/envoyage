@@ -53,7 +53,8 @@ fn initialize_and_list_tools() {
     let instructions = resps[0]["result"]["instructions"].as_str().unwrap();
     assert!(instructions.contains("browser_read_page/browser_find"));
     assert!(instructions.contains("Playwright tests first"));
-    assert!(instructions.contains("captures nothing by default"));
+    assert!(instructions.contains("zero image blocks"));
+    assert!(instructions.contains("full_viewport=true"));
 
     // Every tool is neutrally named by its Envoyage capability (no consumer
     // product prefix such as `immorterm_` or `flam_` may leak here).
@@ -93,7 +94,11 @@ fn initialize_and_list_tools() {
     assert!(screenshot["description"]
         .as_str()
         .unwrap()
-        .contains("OFF by default"));
+        .contains("Explicit visual proof only"));
+    assert_eq!(
+        screenshot["inputSchema"]["properties"]["full_viewport"]["default"],
+        false
+    );
     // eval is gated OFF by default.
     assert!(!names.contains(&"browser_eval"));
 }

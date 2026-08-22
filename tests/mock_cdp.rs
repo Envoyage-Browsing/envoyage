@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -246,7 +247,7 @@ fn reply_for(method: &str, params: &Value, script: &SharedScript) -> Value {
             s.screenshot_called = true;
             // A 1x1 transparent PNG (base64) — real bytes so the engine's
             // "no data" guard passes; the point is that it was CALLED at all.
-            json!({ "data": ONE_PX_PNG })
+            json!({ "data": one_px_png() })
         }
         "Runtime.evaluate" => {
             let expr = params.get("expression").and_then(|e| e.as_str()).unwrap_or("");
@@ -281,6 +282,18 @@ fn evaluate(expr: &str, s: &MockScript) -> Value {
         let payload = json!({ "kind": s.handoff_kind }).to_string();
         return json!({ "result": { "value": payload } });
     }
+    // Compact semantic observation used before/after every ordinary action.
+    if expr.contains("visibleText") && expr.contains("focusRole") {
+        let payload = json!({
+            "title": s.title,
+            "url": s.url,
+            "focusRole": "body",
+            "focusName": "",
+            "visibleText": format!("{} page", s.title),
+        })
+        .to_string();
+        return json!({ "result": { "value": payload } });
+    }
     // AX snapshot (shared/ax-snapshot.js): return a canned listing with one text
     // input carrying a value, so tests can assert the paused value-strip. The
     // password floor is exercised at the JS layer (sdk test) + render layer
@@ -293,7 +306,8 @@ fn evaluate(expr: &str, s: &MockScript) -> Value {
             "url": s.url,
             "items": [{
                 "role": "textbox", "name": "Card number", "value": "4111111111111111",
-                "idx": 0, "interactive": true, "cx": 5, "cy": 5,
+                "idx": 0, "interactive": true, "x": 0, "y": 0,
+                "width": 10, "height": 10, "cx": 5, "cy": 5,
             }],
         })
         .to_string();
@@ -313,8 +327,17 @@ fn evaluate(expr: &str, s: &MockScript) -> Value {
     json!({ "result": { "value": Value::Null } })
 }
 
-/// 1x1 transparent PNG, base64 — a valid image payload for the mock screenshot.
-const ONE_PX_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+/// Generate a valid 1x1 PNG so the production crop/codec path is exercised.
+fn one_px_png() -> String {
+    let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        1,
+        1,
+        image::Rgba([0, 0, 0, 0]),
+    ));
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(cursor.into_inner())
+}
 
 // ─── Engine driver (spawns `envoyage serve --mcp --cdp-url <mock>`) ──────────
 
@@ -434,6 +457,70 @@ fn has_image(result: &Value) -> bool {
     result["content"]
         .as_array()
         .is_some_and(|arr| arr.iter().any(|c| c["type"] == "image"))
+}
+
+#[test]
+fn ten_ordinary_actions_return_zero_image_blocks() {
+    let mock = MockCdp::start(MockScript::page("page", "Fixture", "https://site.test/", ""));
+    let mut engine = Engine::spawn_mcp(&mock.url);
+    let results = vec![
+        engine.tool("browser_open", json!({ "url": "https://site.test/" })),
+        engine.tool("browser_read_page", json!({})),
+        engine.tool("browser_find", json!({ "query": "Card" })),
+        engine.tool("browser_click", json!({ "ref": "ref_1" })),
+        engine.tool("browser_form_input", json!({ "ref": "ref_1", "value": "safe test value" })),
+        engine.tool("browser_key", json!({ "key": "Tab" })),
+        engine.tool("browser_scroll", json!({ "dy": 120 })),
+        engine.tool("browser_reload", json!({})),
+        engine.tool("browser_tabs_list", json!({})),
+        engine.tool("browser_tabs_switch", json!({ "targetId": "page" })),
+    ];
+    assert_eq!(results.len(), 10);
+    assert!(results.iter().all(|result| !has_image(result)));
+    assert!(
+        !mock.script.lock().unwrap().screenshot_called,
+        "ordinary accessibility actions must never issue Page.captureScreenshot"
+    );
+    for result in &results[0..7] {
+        assert!(
+            text_of(result).contains("image_blocks") || !text_of(result).is_empty(),
+            "ordinary action must return compact semantic/accessibility text"
+        );
+    }
+}
+
+#[test]
+fn visual_proof_is_file_first_bounded_and_full_viewport_is_explicit() {
+    let mock = MockCdp::start(MockScript::page("page", "Fixture", "https://site.test/", ""));
+    let mut engine = Engine::spawn_mcp(&mock.url);
+    engine.tool("browser_open", json!({ "url": "https://site.test/" }));
+
+    let implicit = engine.tool("browser_screenshot", json!({}));
+    assert!(!has_image(&implicit));
+    assert!(!mock.script.lock().unwrap().screenshot_called);
+
+    engine.tool("browser_read_page", json!({}));
+    let element = engine.tool(
+        "browser_screenshot",
+        json!({ "ref": "ref_1", "max_width": 320, "max_height": 240 }),
+    );
+    assert!(!has_image(&element), "file-first is the default");
+    let receipt: Value = serde_json::from_str(&text_of(&element)).expect("visual receipt JSON");
+    assert_eq!(receipt["mode"], "element");
+    assert!(receipt["dimensions"]["width"].as_u64().unwrap() <= 320);
+    assert!(receipt["dimensions"]["height"].as_u64().unwrap() <= 240);
+    assert!(std::path::Path::new(receipt["path"].as_str().unwrap()).exists());
+
+    let full = engine.tool("browser_screenshot", json!({ "full_viewport": true }));
+    assert!(!has_image(&full));
+    let full_receipt: Value = serde_json::from_str(&text_of(&full)).expect("full receipt JSON");
+    assert_eq!(full_receipt["mode"], "full_viewport");
+
+    let inline = engine.tool(
+        "browser_screenshot",
+        json!({ "full_viewport": true, "inline": true, "max_width": 320, "max_height": 240 }),
+    );
+    assert!(has_image(&inline), "inline=true is the explicit pixel opt-in");
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

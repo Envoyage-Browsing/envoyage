@@ -88,14 +88,14 @@ ImmorTerm's set, so a model that knows one knows both.
 
 | Tool | What it does |
 |------|--------------|
-| `browser_open` | Open/reuse the browser and navigate. Compact caption; visuals stay in the live Workshop. |
+| `browser_open` | Open/reuse the browser and navigate. Compact semantic diff; zero image blocks. |
 | `browser_read_page` | AX listing of the page as `[ref_N] role "name"` handles. |
 | `browser_find` | Ranked search for elements, same ref shape. |
-| `browser_click` | Click by `ref` (preferred) or `x`/`y`; returns text only. |
-| `browser_form_input` | Set a field/checkbox/dropdown by `ref`; returns text only. |
-| `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*; returns text only. |
-| `browser_scroll` | Scroll by `dy` CSS pixels; returns text only. |
-| `browser_screenshot` | Captures nothing by default. Set `inline: true` only for genuinely visual questions; the opt-in preview is strictly bounded. |
+| `browser_click` | Click by `ref` (preferred) or `x`/`y`; returns a semantic diff and zero images. |
+| `browser_form_input` | Set a field/checkbox/dropdown by `ref`; returns a semantic diff and zero images. |
+| `browser_key` | Press Enter/Tab/Escape/Backspace/Arrow*; returns a semantic diff and zero images. |
+| `browser_scroll` | Scroll by `dy` CSS pixels; returns a semantic diff and zero images. |
+| `browser_screenshot` | Explicit visual proof: ref/changed/cursor crop first; full viewport only via `full_viewport: true`. Returns a bounded file receipt by default; `inline: true` opts pixels into context. |
 | `browser_tabs_list` / `browser_tabs_switch` | Multi-tab / popup handling. |
 | `browser_upload` | Attach a local file to a file input by `ref`. |
 | `browser_console` / `browser_network` | Recent console + network entries. |
@@ -114,11 +114,17 @@ is visibly omitted or truncated with guidance to use `browser_read_page`,
 `browser_find`, or the live Workshop. Routine drive actions never duplicate
 the Workshop frame into model context.
 
+Visual proof is governed per session by count, encoded-pixel, and byte budgets
+(`ENVOYAGE_IMAGE_BUDGET_COUNT`, `ENVOYAGE_IMAGE_BUDGET_PIXELS`, and
+`ENVOYAGE_IMAGE_BUDGET_BYTES`). Every accepted capture records source and
+encoded dimensions/bytes, file/inline mode, and running totals in telemetry.
+When a budget is exceeded, Envoyage returns a text warning—never another image.
+
 Agent workflow is stated directly in MCP initialization and tool descriptions:
-use Envoyage's AX/ref surface for exploratory control, request a bounded preview
-only for visual judgment, prefer project Playwright/Puppeteer tests for
-deterministic verification, and use human handoff for credentials or
-user-browser state.
+use Envoyage's accessibility/ref surface and semantic diffs for exploratory
+control, request bounded crop-first proof only for visual judgment, prefer
+project Playwright tests for deterministic verification, and use human handoff
+for credentials or user-browser state.
 
 ## Bounded website crawling
 
