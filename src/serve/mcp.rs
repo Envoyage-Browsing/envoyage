@@ -13,8 +13,6 @@ use crate::browser;
 use crate::crawl::{self, CrawlRequest};
 use crate::protocol::{Cursor, CursorAction, HumanRequest, Narration, State};
 use base64::Engine as _;
-use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -132,7 +130,7 @@ pub fn handle_request(session_id: &str, req: &JsonRpcRequest) -> JsonRpcResponse
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                "instructions": "For repeatable product verification, use the repository's Playwright tests first: assertions and failure-only traces are more reliable and context-efficient than screenshots. Use Envoyage for compact exploratory control: browser_read_page/browser_find, then act by ref. Drive actions are text-only because visual frames stream separately to the live Workshop. browser_screenshot captures nothing by default; only browser_screenshot {\"inline\":true} returns a bounded preview, and only for genuinely visual judgment. Puppeteer is an acceptable fallback when already used by the project. Use human handoff for login, secrets, permissions, or user-browser state.",
+                "instructions": crate::agent_contract::ACCESSIBILITY_FIRST_INSTRUCTIONS,
             })),
             ..base
         },
@@ -166,16 +164,7 @@ fn call_tool(session_id: &str, params: &Value, base: JsonRpcResponse) -> JsonRpc
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Screenshot-returning tools (text caption + image content).
-    if matches!(
-        tool_name,
-        "browser_open"
-            | "browser_screenshot"
-            | "browser_click"
-            | "browser_form_input"
-            | "browser_key"
-            | "browser_scroll"
-    ) {
+    if matches!(tool_name, "browser_open" | "browser_screenshot" | "browser_click" | "browser_form_input" | "browser_key" | "browser_scroll") {
         return match handle_browser_shot(session_id, tool_name, &arguments) {
             Ok(content) => JsonRpcResponse {
                 result: Some(json!({ "content": content })),
@@ -408,49 +397,14 @@ fn hand_off_to_human(session_id: &str, reason: &str, instructions: Option<&str>)
     )
 }
 
-fn bounded_screenshot_content(png_base64: &str) -> Result<Value, String> {
-    if png_base64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
-        return Ok(json!({
-            "type": "image",
-            "data": png_base64,
-            "mimeType": "image/png",
-        }));
-    }
-
-    let source = base64::engine::general_purpose::STANDARD
-        .decode(png_base64)
-        .map_err(|error| format!("decode screenshot for bounded preview: {error}"))?;
-    let image = image::load_from_memory(&source)
-        .map_err(|error| format!("decode screenshot pixels for bounded preview: {error}"))?;
-    let source_width = image.width().max(1);
-    let source_height = image.height().max(1);
-
-    // Reuse one decoded source while progressively lowering preview cost. The
-    // final serialized-response guard remains authoritative for every handler.
-    const CANDIDATES: &[(u32, u8)] = &[(768, 55), (640, 45), (512, 35), (384, 25)];
-    for (max_width, quality) in CANDIDATES {
-        let width = source_width.min(*max_width);
-        let height = ((source_height as u64 * width as u64) / source_width as u64)
-            .max(1)
-            .min(u32::MAX as u64) as u32;
-        let preview = image.resize(width, height, FilterType::Triangle).to_rgb8();
-        let mut encoded = Vec::new();
-        JpegEncoder::new_with_quality(&mut encoded, *quality)
-            .encode_image(&preview)
-            .map_err(|error| format!("encode bounded screenshot preview: {error}"))?;
-        let data = base64::engine::general_purpose::STANDARD.encode(encoded);
-        if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
-            return Ok(json!({
-                "type": "image",
-                "data": data,
-                "mimeType": "image/jpeg",
-            }));
-        }
-    }
-
-    Err(format!(
-        "screenshot preview remains above the hard {MAX_INLINE_IMAGE_BASE64_BYTES}-byte inline-image ceiling"
-    ))
+fn write_visual_file(session_id: &str, visual: &crate::agent_contract::EncodedVisual) -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("envoyage").join("screenshots");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create screenshot directory: {error}"))?;
+    let safe_session: String = session_id.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' }).collect();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let path = dir.join(format!("{safe_session}-{stamp}.{}", if visual.format == "jpeg" { "jpg" } else { "png" }));
+    std::fs::write(&path, &visual.bytes).map_err(|error| format!("write screenshot: {error}"))?;
+    Ok(path)
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────
@@ -468,6 +422,11 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
 
     let mut cursor: Option<(f64, f64, CursorAction)> = None;
     let mut narration: Option<String> = None;
+    let mut screenshot_hint = if tool == "browser_screenshot" {
+        state::visual_hint(session_id)
+    } else {
+        None
+    };
 
     let requested_screenshot = tool == "browser_screenshot";
     let include_inline_image = requested_screenshot
@@ -475,8 +434,24 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
             .get("inline")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    let (png, title, url, handoff, cursor, narration) =
+    let full_viewport = requested_screenshot
+        && args.get("full_viewport").and_then(Value::as_bool).unwrap_or(false);
+    if full_viewport {
+        screenshot_hint = None;
+    }
+    let capture_requested = requested_screenshot
+        && (full_viewport
+            || include_inline_image
+            || args.get("ref").and_then(Value::as_str).is_some()
+            || screenshot_hint.is_some());
+    let (png, title, url, handoff, cursor, narration, semantic_diff, visual_hint) =
         with_browser(session_id, launch_url, |b| {
+            let before = b.semantic_state();
+            let console_before = b.console_log().len();
+            let network_before = b.network_log().len();
+            let mut target_role = String::new();
+            let mut target_name = String::new();
+            let mut visual_hint = None;
             match tool {
                 "browser_open" => {
                     let url = args
@@ -484,17 +459,39 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                         .and_then(|s| s.as_str())
                         .ok_or("'url' is required")?;
                     narration = Some(format!("Opening {url}"));
+                    target_role = "document".to_string();
+                    target_name = url.to_string();
                     let before = b.page_target_ids();
                     b.navigate(url)?;
                     // A navigation can open a popup/new tab (e.g. a landing page that
                     // immediately pops an auth window); follow it like click/key do.
                     b.follow_new_target(&before);
                 }
-                "browser_screenshot" => {}
+                "browser_screenshot" => {
+                    if let Some(handle) = args.get("ref").and_then(Value::as_str) {
+                        let node = b.resolve_ref(handle)?;
+                        screenshot_hint = Some(state::VisualHint {
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            source: "element",
+                        });
+                    }
+                }
                 "browser_click" => {
                     let before = b.page_target_ids();
                     if let Some(handle) = args.get("ref").and_then(|s| s.as_str()) {
                         if let Ok(node) = b.resolve_ref(handle) {
+                            target_role = node.role.clone();
+                            target_name = node.name.clone();
+                            visual_hint = Some(state::VisualHint {
+                                x: node.x,
+                                y: node.y,
+                                width: node.width,
+                                height: node.height,
+                                source: "changed_region",
+                            });
                             cursor = Some((node.cx, node.cy, CursorAction::Click));
                             let name = if node.name.is_empty() {
                                 handle.to_string()
@@ -514,6 +511,9 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                             .and_then(|v| v.as_f64())
                             .ok_or("provide 'ref' (from read_page/find) or both 'x' and 'y'")?;
                         cursor = Some((x, y, CursorAction::Click));
+                        target_role = "point".to_string();
+                        target_name = format!("({x:.0}, {y:.0})");
+                        visual_hint = Some(cursor_visual_hint(x, y));
                         narration = Some(format!("Clicking ({x:.0}, {y:.0})"));
                         b.click(x, y)?;
                     }
@@ -529,6 +529,15 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                         .and_then(|s| s.as_str())
                         .ok_or("'value' is required")?;
                     if let Ok(node) = b.resolve_ref(handle) {
+                        target_role = node.role.clone();
+                        target_name = node.name.clone();
+                        visual_hint = Some(state::VisualHint {
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            source: "changed_region",
+                        });
                         cursor = Some((node.cx, node.cy, CursorAction::Type));
                         let name = if node.name.is_empty() {
                             handle.to_string()
@@ -547,6 +556,8 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                         .and_then(|s| s.as_str())
                         .ok_or("'key' is required")?;
                     narration = Some(format!("Pressing {key}"));
+                    target_role = "key".to_string();
+                    target_name = key.to_string();
                     b.key(key)?;
                     settle();
                     b.follow_new_target(&before);
@@ -557,6 +568,10 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
                         .and_then(|v| v.as_f64())
                         .ok_or("'dy' is required")?;
                     cursor = Some((640.0, 400.0, CursorAction::Scroll));
+                    target_role = "document".to_string();
+                    target_name = if dy >= 0.0 { "scroll down" } else { "scroll up" }.to_string();
+                    let (x, y) = b.cursor_position();
+                    visual_hint = Some(cursor_visual_hint(x, y));
                     narration = Some(format!(
                         "Scrolling {}",
                         if dy >= 0.0 { "down" } else { "up" }
@@ -574,14 +589,27 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
             let (title, url) = b.current_title_url();
             let png = if handoff.is_some()
                 || state::is_paused(session_id)
-                || !include_inline_image
+                || !capture_requested
             {
                 None
             } else {
                 Some(b.screenshot()?)
             };
-            Ok((png, title, url, handoff, cursor, narration))
+            b.pump_events();
+            let after = b.semantic_state();
+            let (console_errors, failed_requests) =
+                recent_failures(b, console_before, network_before);
+            let semantic_diff = if requested_screenshot {
+                None
+            } else {
+                Some(render_semantic_diff(tool, &target_role, &target_name, &before, &after, console_errors, failed_requests))
+            };
+            Ok((png, title, url, handoff, cursor, narration, semantic_diff, visual_hint))
         })?;
+
+    if let Some(hint) = visual_hint {
+        state::set_visual_hint(session_id, hint);
+    }
 
     if let Some(text) = &narration {
         emit_narration(session_id, text);
@@ -611,13 +639,15 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
         })]);
     }
 
+    if let Some(diff) = semantic_diff {
+        return Ok(vec![json!({ "type": "text", "text": diff })]);
+    }
+
     let mut content = vec![json!({
         "type": "text",
-        "text": if include_inline_image {
-            format!("🌐 {title} — {url}")
-        } else if requested_screenshot {
+        "text": if requested_screenshot {
             format!(
-                "🌐 {title} — {url}\nNo screenshot was captured or inserted into agent context. Use browser_read_page/browser_find or Playwright for functional verification. Only call browser_screenshot with inline=true when pixel-level visual judgment is genuinely necessary."
+                "🌐 {title} — {url}\nNo screenshot was captured. Request an element crop with ref, use the most recent changed/cursor region, or set full_viewport=true explicitly. Set inline=true only when the image itself must enter agent context."
             )
         } else {
             format!(
@@ -626,31 +656,141 @@ fn handle_browser_shot(session_id: &str, tool: &str, args: &Value) -> Result<Vec
         },
     })];
     if let Some(png) = png {
-        match bounded_screenshot_content(&png) {
-            Ok(image) => content.push(image),
-            Err(error) => content.push(json!({
-                "type": "text",
-                "text": format!(
-                    "⚠️ Envoyage context guard omitted this screenshot: {error}. Use the live Workshop, browser_read_page, or browser_find."
-                ),
-            })),
+        let format = args.get("format").and_then(Value::as_str).unwrap_or("jpeg");
+        let max_width = args.get("max_width").and_then(Value::as_u64).unwrap_or(768).clamp(64, 1600) as u32;
+        let max_height = args.get("max_height").and_then(Value::as_u64).unwrap_or(768).clamp(64, 1600) as u32;
+        let quality = args.get("quality").and_then(Value::as_u64).unwrap_or(55).clamp(20, 90) as u8;
+        let visual = crate::agent_contract::encode_visual(&png, screenshot_hint.as_ref(), max_width, max_height, quality, format)?;
+        if let Some(warning) = crate::agent_contract::budget_warning(
+            state::image_usage_for(session_id),
+            &visual,
+            crate::agent_contract::ImageLimits::from_env(),
+        ) {
+            content.push(json!({ "type": "text", "text": warning }));
+            return Ok(content);
+        }
+        let path = write_visual_file(session_id, &visual)?;
+        let totals = state::add_image_usage(
+            session_id,
+            visual.width as u64 * visual.height as u64,
+            visual.bytes.len() as u64,
+        );
+        let mode = if full_viewport {
+            "full_viewport"
+        } else {
+            screenshot_hint.as_ref().map(|hint| hint.source).unwrap_or("viewport")
+        };
+        let receipt = json!({
+            "operation": "browser_screenshot",
+            "mode": mode,
+            "path": path,
+            "dimensions": { "width": visual.width, "height": visual.height },
+            "format": visual.format,
+            "bytes": visual.bytes.len(),
+            "inline": include_inline_image,
+            "source": { "width": visual.source_width, "height": visual.source_height, "bytes": base64::engine::general_purpose::STANDARD.decode(&png).map(|bytes| bytes.len()).unwrap_or(0) },
+            "session_totals": { "count": totals.count, "pixels": totals.pixels, "bytes": totals.bytes },
+        });
+        eprintln!("envoyage_visual_telemetry={receipt}");
+        content[0] = json!({ "type": "text", "text": receipt.to_string() });
+        if include_inline_image {
+            let data = base64::engine::general_purpose::STANDARD.encode(&visual.bytes);
+            if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+                content.push(json!({
+                    "type": "image",
+                    "data": data,
+                    "mimeType": if visual.format == "jpeg" { "image/jpeg" } else { "image/png" },
+                }));
+            } else {
+                content.push(json!({
+                    "type": "text",
+                    "text": format!("⚠️ Inline image omitted because {} base64 bytes exceed the hard {}-byte inline ceiling. The bounded file remains at {}.", data.len(), MAX_INLINE_IMAGE_BASE64_BYTES, path.display()),
+                }));
+            }
         }
     }
     Ok(content)
 }
 
+fn cursor_visual_hint(x: f64, y: f64) -> state::VisualHint {
+    state::VisualHint {
+        x: (x - 180.0).max(0.0),
+        y: (y - 140.0).max(0.0),
+        width: 360.0,
+        height: 280.0,
+        source: "cursor",
+    }
+}
+
+fn network_line_failed(line: &str) -> bool {
+    line.split_whitespace()
+        .next()
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| status >= 400)
+}
+
+fn recent_failures(
+    browser: &browser::BrowserSession,
+    console_before: usize,
+    network_before: usize,
+) -> (Vec<String>, Vec<String>) {
+    let console = browser.console_log();
+    let network = browser.network_log();
+    let console_errors = console[console_before.min(console.len())..]
+        .iter()
+        .filter(|line| line.starts_with("error:"))
+        .take(8)
+        .cloned()
+        .collect();
+    let failed_requests = network[network_before.min(network.len())..]
+        .iter()
+        .filter(|line| network_line_failed(line))
+        .take(8)
+        .cloned()
+        .collect();
+    (console_errors, failed_requests)
+}
+
+fn render_semantic_diff(
+    operation: &str,
+    target_role: &str,
+    target_name: &str,
+    before: &browser::SemanticState,
+    after: &browser::SemanticState,
+    console_errors: Vec<String>,
+    failed_requests: Vec<String>,
+) -> String {
+    crate::agent_contract::semantic_diff(
+        operation,
+        target_role,
+        target_name,
+        before,
+        after,
+        console_errors,
+        failed_requests,
+    )
+}
+
 fn handle_reload(session_id: &str, args: &Value) -> Result<String, String> {
     let hard = args.get("hard").and_then(Value::as_bool).unwrap_or(true);
     with_browser(session_id, None, |b| {
+        let before = b.semantic_state();
+        let console_before = b.console_log().len();
+        let network_before = b.network_log().len();
         b.reload(hard)?;
-        let (title, url) = b.current_title_url();
-        Ok(format!(
-            "Reloaded {title} — {url} ({})\nVisual update streamed to the live Workshop; use browser_read_page or browser_find for compact page state.",
-            if hard {
-                "HTTP cache cleared; cache disabled; service worker bypassed"
-            } else {
-                "normal reload"
-            }
+        settle();
+        b.pump_events();
+        let after = b.semantic_state();
+        let (console_errors, failed_requests) = recent_failures(b, console_before, network_before);
+        let target = if hard { "hard reload (cache cleared, cache disabled, service worker bypassed)" } else { "normal reload" };
+        Ok(render_semantic_diff(
+            "browser_reload",
+            "document",
+            target,
+            &before,
+            &after,
+            console_errors,
+            failed_requests,
         ))
     })
 }
@@ -732,9 +872,25 @@ fn handle_tabs_switch(session_id: &str, args: &Value) -> Result<String, String> 
         .and_then(|s| s.as_str())
         .map(String::from);
     with_browser(session_id, None, |b| {
+        let before = b.semantic_state();
+        let console_before = b.console_log().len();
+        let network_before = b.network_log().len();
         b.tabs_switch(index, target_id.as_deref())?;
         let (title, url, nodes) = b.snapshot(true)?;
-        Ok(browser::render_ax_listing(&title, &url, &nodes, true))
+        b.pump_events();
+        let after = b.semantic_state();
+        let (console_errors, failed_requests) = recent_failures(b, console_before, network_before);
+        let target = target_id.as_deref().map(str::to_string).or_else(|| index.map(|value| value.to_string())).unwrap_or_default();
+        let diff = render_semantic_diff(
+            "browser_tabs_switch",
+            "tab",
+            &target,
+            &before,
+            &after,
+            console_errors,
+            failed_requests,
+        );
+        Ok(format!("{diff}\n{}", browser::render_ax_listing(&title, &url, &nodes, true)))
     })
 }
 
@@ -1011,15 +1167,15 @@ mod context_budget_tests {
         image::DynamicImage::ImageRgb8(pixels)
             .write_to(&mut encoded, image::ImageFormat::Png)
             .unwrap();
-        let png = base64::engine::general_purpose::STANDARD.encode(encoded.into_inner());
+        let source_bytes = encoded.into_inner();
+        let source_len = source_bytes.len();
+        let png = base64::engine::general_purpose::STANDARD.encode(source_bytes);
         assert!(png.len() > MAX_INLINE_IMAGE_BASE64_BYTES);
 
-        let preview = bounded_screenshot_content(&png).unwrap();
-        assert_eq!(preview["mimeType"], "image/jpeg");
-        assert!(
-            preview["data"].as_str().unwrap().len() <= MAX_INLINE_IMAGE_BASE64_BYTES,
-            "preview must fit the hard inline-image ceiling"
-        );
+        let preview = crate::agent_contract::encode_visual(&png, None, 640, 640, 45, "jpeg").unwrap();
+        assert_eq!(preview.format, "jpeg");
+        assert!(preview.width <= 640 && preview.height <= 640);
+        assert!(preview.bytes.len() < source_len);
     }
 
     #[test]
@@ -1048,5 +1204,25 @@ mod context_budget_tests {
 
         assert!(encoded.len() <= MAX_TOOL_RESULT_BYTES);
         assert!(bounded.result.unwrap()["isError"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn exceeded_visual_budget_returns_text_guard_before_file_or_inline_output() {
+        let visual = crate::agent_contract::EncodedVisual {
+            bytes: vec![0; 101],
+            width: 11,
+            height: 10,
+            source_width: 11,
+            source_height: 10,
+            format: "jpeg",
+        };
+        let warning = crate::agent_contract::budget_warning(
+            state::image_usage_for("budget-unit-test"),
+            &visual,
+            crate::agent_contract::ImageLimits { count: 0, pixels: 100, bytes: 100 },
+        )
+        .expect("all three limits are exceeded");
+        assert!(warning.contains("no image was returned or written"));
+        assert_eq!(state::image_usage_for("budget-unit-test").count, 0);
     }
 }

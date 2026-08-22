@@ -162,12 +162,11 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "browser_screenshot",
-            "description": "Screenshot capture is OFF by default. A call without inline=true returns compact guidance and does not issue Page.captureScreenshot. Set inline=true only when pixel-level visual judgment is genuinely necessary (layout, styling, canvas, or image output); the result is a bounded compressed preview. For routine navigation use browser_read_page/browser_find, and for product verification use Playwright tests first (Puppeteer is an acceptable project-specific fallback). Oversized image data is omitted instead of entering agent context.",
+            "description": crate::agent_contract::SCREENSHOT_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "inline": { "type": "boolean", "description": "Opt in to one bounded inline preview. Defaults to false, which captures and returns no image." }
-                },
+                "additionalProperties": false,
+                "properties": crate::agent_contract::screenshot_properties(),
                 "required": []
             }
         }),

@@ -22,6 +22,7 @@
 #![allow(clippy::type_complexity)]
 
 pub mod browser;
+pub mod agent_contract;
 pub mod browser_lock;
 pub mod crawl;
 pub mod protocol;

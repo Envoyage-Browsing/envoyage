@@ -67,14 +67,14 @@ knows one knows both.
 
 | Tool | Args | Returns | Notes |
 |------|------|---------|-------|
-| `browser_open` | `url` | compact caption | Opens/reuses the browser and navigates; visual frames stay on the live-view transport. `http`/`https`/`about:blank` only. |
+| `browser_open` | `url` | compact semantic diff | Opens/reuses the browser and navigates; returns zero image blocks. `http`/`https`/`about:blank` only. |
 | `browser_read_page` | `interactive_only?` | text: `[ref_N] role "name"` listing | The cheap way to understand a page (no image tokens). **Untrusted content.** |
 | `browser_find` | `query` | text: ranked `[ref_N]` listing | Search a long page; same ref shape. |
-| `browser_click` | `ref` \| `x`,`y` | compact caption | Prefer `ref`; coords are a fallback. Visuals stream separately. |
-| `browser_form_input` | `ref`, `value` | compact caption | Set a field/checkbox/dropdown. Visuals stream separately. |
-| `browser_key` | `key` | compact caption | `Enter`/`Tab`/`Escape`/`Backspace`/`Arrow*`. Visuals stream separately. |
-| `browser_scroll` | `dy` | compact caption | CSS px; positive = down. Visuals stream separately. |
-| `browser_screenshot` | `inline?` (default `false`) | compact guidance, or an opt-in bounded preview | No capture occurs by default. Use `inline: true` only for pixel-level visual judgment; use Playwright first for repeatable verification. |
+| `browser_click` | `ref` \| `x`,`y` | compact semantic diff | Prefer `ref`; coords are a fallback. Always zero image blocks. |
+| `browser_form_input` | `ref`, `value` | compact semantic diff | Set a field/checkbox/dropdown. Always zero image blocks. |
+| `browser_key` | `key` | compact semantic diff | `Enter`/`Tab`/`Escape`/`Backspace`/`Arrow*`. Always zero image blocks. |
+| `browser_scroll` | `dy` | compact semantic diff | CSS px; positive = down. Always zero image blocks. |
+| `browser_screenshot` | `ref?`, `full_viewport?`, `inline?`, format/size/quality | file receipt; optional bounded image | Explicit visual proof only. Prefers element/changed/cursor crops; full viewport needs `full_viewport: true`; `inline: true` is the only pixel-to-context path. Per-session count/pixel/byte budgets apply. |
 | `browser_tabs_list` | — | text: tab list | Popups/OAuth windows. **Untrusted content.** |
 | `browser_tabs_switch` | `index` \| `targetId` | read_page listing | Switch tab, then read it. |
 | `browser_upload` | `ref`, `path` | text | Attach a local file to a `<input type=file>`. |

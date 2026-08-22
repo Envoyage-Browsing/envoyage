@@ -8,6 +8,7 @@
 //! feed [`protocol::Input`] back through an input queue the pump drains.
 
 use crate::browser::BrowserSession;
+use crate::agent_contract;
 use crate::protocol::Input;
 use crate::serve::recorder::Recording;
 use std::collections::HashMap;
@@ -136,6 +137,48 @@ pub fn set_paused(session_id: &str, v: bool) {
     }
 }
 
+/// Best bounded region associated with the most recent drive action. Visual
+/// proof can use it for a changed-region or cursor fallback without returning
+/// screenshots from the action itself.
+pub type VisualHint = agent_contract::VisualRegion;
+
+static VISUAL_HINTS: OnceLock<Mutex<HashMap<String, VisualHint>>> = OnceLock::new();
+
+fn visual_hints() -> &'static Mutex<HashMap<String, VisualHint>> {
+    VISUAL_HINTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn set_visual_hint(session_id: &str, hint: VisualHint) {
+    if let Ok(mut hints) = visual_hints().lock() {
+        hints.insert(session_id.to_string(), hint);
+    }
+}
+
+pub fn visual_hint(session_id: &str) -> Option<VisualHint> {
+    visual_hints().lock().ok().and_then(|hints| hints.get(session_id).cloned())
+}
+
+pub type ImageUsage = agent_contract::ImageUsage;
+
+static IMAGE_USAGE: OnceLock<Mutex<HashMap<String, ImageUsage>>> = OnceLock::new();
+
+fn image_usage() -> &'static Mutex<HashMap<String, ImageUsage>> {
+    IMAGE_USAGE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn image_usage_for(session_id: &str) -> ImageUsage {
+    image_usage().lock().ok().and_then(|usage| usage.get(session_id).copied()).unwrap_or_default()
+}
+
+pub fn add_image_usage(session_id: &str, pixels: u64, bytes: u64) -> ImageUsage {
+    let mut usage = image_usage().lock().expect("image usage poisoned");
+    let total = usage.entry(session_id.to_string()).or_default();
+    total.count = total.count.saturating_add(1);
+    total.pixels = total.pixels.saturating_add(pixels);
+    total.bytes = total.bytes.saturating_add(bytes);
+    *total
+}
+
 /// A serialized protocol envelope (`{"type":"browser_*", ...}`) broadcast to
 /// every connected live-view client (WS or SSE) of one session. `String` (not
 /// the typed event) so a client that joins late simply misses old frames —
@@ -258,6 +301,12 @@ pub fn clear_session_state(session_id: &str) {
         map.remove(session_id);
     }
     if let Ok(mut map) = paused_map().lock() {
+        map.remove(session_id);
+    }
+    if let Ok(mut map) = visual_hints().lock() {
+        map.remove(session_id);
+    }
+    if let Ok(mut map) = image_usage().lock() {
         map.remove(session_id);
     }
     if let Ok(mut map) = channels_registry().lock() {

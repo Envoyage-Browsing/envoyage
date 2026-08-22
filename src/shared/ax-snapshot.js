@@ -75,6 +75,10 @@
     const item = {
       role, name: NAME(el, role, idx), value, idx,
       interactive: INTERACTIVE.has(role),
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
       cx: Math.round(rect.x + rect.width / 2),
       cy: Math.round(rect.y + rect.height / 2),
     };

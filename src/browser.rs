@@ -169,12 +169,28 @@ pub struct AxNode {
     /// as a fallback if the live re-query (via `dom_idx`) fails.
     pub cx: f64,
     pub cy: f64,
+    /// Visible CSS-pixel box used for explicit element-scoped visual proof.
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
     /// Whether the role accepts an action (link/button/textbox/…).
     pub interactive: bool,
     /// Stable index the snapshot JS stamped onto the DOM element as
     /// `data-immorterm-ref="N"`. Lets click/form_input re-query the live element
     /// and re-measure its box, so refs survive non-navigating reflows.
     pub dom_idx: u64,
+}
+
+/// Compact page state captured before and after an ordinary browser action.
+/// It deliberately contains semantics only—never pixels or raw HTML.
+#[derive(Clone, Debug, Default)]
+pub struct SemanticState {
+    pub title: String,
+    pub url: String,
+    pub focus_role: String,
+    pub focus_name: String,
+    pub visible_text: String,
 }
 
 /// A live browser + the CDP transport to it. The browser is either one we
@@ -1037,10 +1053,14 @@ impl BrowserSession {
                     .map(|s| s.to_string());
                 let cx = item.get("cx").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let cy = item.get("cy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let x = item.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = item.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let width = item.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let height = item.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let dom_idx = item.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 self.ref_counter += 1;
                 let handle = format!("ref_{}", self.ref_counter);
-                let node = AxNode { role, name, value, cx, cy, interactive, dom_idx };
+                let node = AxNode { role, name, value, cx, cy, x, y, width, height, interactive, dom_idx };
                 self.refs.insert(handle.clone(), node.clone());
                 out.push((handle, node));
             }
@@ -1256,6 +1276,37 @@ impl BrowserSession {
             }
             Err(_) => (String::new(), String::new()),
         }
+    }
+
+    /// Capture a bounded, accessibility-oriented observation without changing
+    /// the current ref table. This is safe to call around an action that was
+    /// addressed by a previously minted ref.
+    pub fn semantic_state(&mut self) -> SemanticState {
+        const JS: &str = r#"(() => {
+          const el = document.activeElement;
+          const role = el ? (el.getAttribute('role') || el.tagName.toLowerCase()) : '';
+          const name = el ? (el.getAttribute('aria-label') || el.getAttribute('title') || el.placeholder || el.textContent || '') : '';
+          const text = (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
+          return JSON.stringify({title: document.title, url: location.href, focusRole: role, focusName: String(name).trim().slice(0, 200), visibleText: text});
+        })()"#;
+        let parsed = self
+            .eval_raw(JS)
+            .ok()
+            .and_then(|value| value.as_str().and_then(|raw| serde_json::from_str::<Value>(raw).ok()))
+            .unwrap_or_else(|| json!({}));
+        SemanticState {
+            title: parsed.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+            url: parsed.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+            focus_role: parsed.get("focusRole").and_then(Value::as_str).unwrap_or("").to_string(),
+            focus_name: parsed.get("focusName").and_then(Value::as_str).unwrap_or("").to_string(),
+            visible_text: parsed.get("visibleText").and_then(Value::as_str).unwrap_or("").to_string(),
+        }
+    }
+
+    /// Last synthetic cursor position in CSS pixels, for an explicit bounded
+    /// cursor crop when no stable element ref is available.
+    pub fn cursor_position(&self) -> (f64, f64) {
+        self.cursor_pos
     }
 
     // ── Teardown (exact-PID only) ────────────────────────────────────
@@ -1909,11 +1960,11 @@ mod tests {
         let nodes = vec![
             ("ref_1".to_string(), AxNode {
                 role: "button".into(), name: "Sign in".into(), value: None,
-                cx: 10.0, cy: 20.0, interactive: true, dom_idx: 0,
+                cx: 10.0, cy: 20.0, x: 0.0, y: 0.0, width: 20.0, height: 40.0, interactive: true, dom_idx: 0,
             }),
             ("ref_2".to_string(), AxNode {
                 role: "textbox".into(), name: "Search".into(), value: Some(String::new()),
-                cx: 5.0, cy: 6.0, interactive: true, dom_idx: 1,
+                cx: 5.0, cy: 6.0, x: 0.0, y: 0.0, width: 10.0, height: 12.0, interactive: true, dom_idx: 1,
             }),
         ];
         let out = render_ax_listing("T", "https://x", &nodes, true);
@@ -1928,7 +1979,7 @@ mod tests {
     fn ref_listing_find_omits_header() {
         let nodes = vec![("ref_9".to_string(), AxNode {
             role: "link".into(), name: "Home".into(), value: None,
-            cx: 1.0, cy: 2.0, interactive: true, dom_idx: 0,
+            cx: 1.0, cy: 2.0, x: 0.0, y: 0.0, width: 2.0, height: 4.0, interactive: true, dom_idx: 0,
         })];
         let out = render_ax_listing("T", "u", &nodes, false);
         assert!(!out.contains("Title:"));
@@ -1939,7 +1990,7 @@ mod tests {
     fn rank_prefers_exact_then_prefix_then_substring() {
         let mk = |name: &str, role: &str| AxNode {
             role: role.into(), name: name.into(), value: None,
-            cx: 0.0, cy: 0.0, interactive: true, dom_idx: 0,
+            cx: 0.0, cy: 0.0, x: 0.0, y: 0.0, width: 1.0, height: 1.0, interactive: true, dom_idx: 0,
         };
         assert_eq!(rank_match("sign in", &mk("Sign In", "button")), 100);
         assert_eq!(rank_match("sign", &mk("Sign In", "button")), 70);
@@ -2138,6 +2189,10 @@ mod tests {
                 value: None, // masked by the floor in ax-snapshot.js
                 cx: 1.0,
                 cy: 1.0,
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
                 interactive: true,
                 dom_idx: 0,
             },
@@ -2163,6 +2218,10 @@ mod tests {
                 value: Some("4111111111111111".into()),
                 cx: 1.0,
                 cy: 1.0,
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
                 interactive: true,
                 dom_idx: 0,
             },
@@ -2219,7 +2278,7 @@ mod tests {
         let mut refs = HashMap::new();
         refs.insert("ref_3".to_string(), AxNode {
             role: "button".into(), name: "Go".into(), value: None,
-            cx: 42.0, cy: 84.0, interactive: true, dom_idx: 0,
+            cx: 42.0, cy: 84.0, x: 0.0, y: 0.0, width: 84.0, height: 168.0, interactive: true, dom_idx: 0,
         });
         // Emulate resolve_ref lookup + center extraction.
         let node = refs.get("ref_3").cloned().unwrap();
